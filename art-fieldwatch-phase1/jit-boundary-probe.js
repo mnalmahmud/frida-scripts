@@ -15,16 +15,22 @@ function sdkLevel() {
     return rc > 0 ? Number(buf.readUtf8String()) : NaN;
   } catch (e) { log('sdk-error=' + e); return NaN; }
 }
-function getExport(module, prefix) {
-  return module.enumerateExports().find(e => e.type === 'function' && e.name.startsWith(prefix));
+const NAMES = {
+  internal: '_ZN3art3jit3Jit21CompileMethodInternalEPNS_9ArtMethodEPNS_6ThreadENS_15CompilationKindEb',
+  publicCompile: '_ZN3art3jit3Jit13CompileMethodEPNS_9ArtMethodEPNS_6ThreadENS_15CompilationKindEb',
+  compiler: '_ZN3art3jit11JitCompiler13CompileMethodEPNS_6ThreadEPNS0_15JitMemoryRegionEPNS_9ArtMethodENS_15CompilationKindE',
+  instance: '_ZN3art3jit3Jit13jit_compiler_E'
+};
+function getExport(module, exactName) {
+  const address = module.findExportByName(exactName);
+  return address === null ? null : {name: exactName, address};
 }
 function compilerViaVtable(runtime, compiler) {
   // This is an ABI-specific experiment, NOT a generic C++ vtable scanner.
   // In the AOSP JitCompilerInterface declaration, virtual ~JitCompilerInterface()
   // is followed by virtual CompileMethod(). For the Itanium C++ ABI used by
   // Android x86_64/arm64, the destructor occupies slots 0/1 and CompileMethod slot 2.
-  const symbol = runtime.enumerateExports().find(e =>
-    e.name === '_ZN3art3jit3Jit13jit_compiler_E');
+  const symbol = getExport(runtime, NAMES.instance);
   if (!symbol) { log('compiler-vtable=unavailable (jit_compiler_ not exported)'); return null; }
   try {
     const instance = symbol.address.readPointer(); // Existing compiler instance; NEVER call jit_load().
@@ -86,13 +92,16 @@ function main() {
   const modules = Process.enumerateModules().filter(m => artLibraries.has(m.name));
   for (const module of modules) {
     log('module=' + module.name + ' base=' + module.base + ' path=' + module.path);
-    try {
-      const matches = module.enumerateExports().filter(e =>
-        /jit_load|jit_compiler_|CompileMethod/.test(e.name));
-      log('exports=' + module.name + ' matches=' + matches.length);
-      matches.slice(0, 30).forEach(e =>
-        log('export=' + module.name + ' name=' + e.name + ' address=' + e.address));
-    } catch (e) { log('export-error=' + module.name + ': ' + e); }
+    // Targeted export lookup avoids potentially fragile full export-table scans
+    // in injected processes (especially API 33 in earlier CI attempts).
+    for (const name of [NAMES.internal, NAMES.publicCompile,
+                        NAMES.compiler, NAMES.instance, 'jit_load']) {
+      try {
+        const site = getExport(module, name);
+        if (site) log('export=' + module.name + ' name=' + name +
+                      ' address=' + site.address);
+      } catch (e) { log('export-lookup-error ' + name + ': ' + e); }
+    }
   }
   // Only claim argument decoding for the tested, architecture-specific ABI profiles.
   if (Process.pointerSize !== 8 || !['x64', 'arm64'].includes(Process.arch) ||
@@ -104,7 +113,7 @@ function main() {
                                      m.name === 'libartd-compiler.so');
   let hooked = 0;
   if (runtime) {
-    const internal = getExport(runtime, '_ZN3art3jit3Jit21CompileMethodInternalE');
+    const internal = getExport(runtime, NAMES.internal);
     if (internal) {
       hooked += Number(attach('runtime_internal',
         {address: internal.address, name: internal.name, source: 'export'}));
@@ -113,7 +122,7 @@ function main() {
     }
   }
   if (runtime && compiler) {
-    const exported = getExport(compiler, '_ZN3art3jit11JitCompiler13CompileMethodE');
+    const exported = getExport(compiler, NAMES.compiler);
     const fromVtable = compilerViaVtable(runtime, compiler);
     if (exported && fromVtable && !exported.address.equals(fromVtable.address))
       log('compiler-export-vtable-address-mismatch export=' + exported.address +
