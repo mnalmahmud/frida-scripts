@@ -1,0 +1,14 @@
+plugins {
+ id 'com.android.application'
+}
+android {
+ namespace 'com.example.artfieldwatch'
+ compileSdk 35
+ defaultConfig {
+  applicationId 'com.example.artfieldwatch'
+  minSdk 21
+  targetSdk 28
+  versionCode 1
+  versionName '0.1'
+ }
+}

@@ -1,0 +1,96 @@
+name: ART Fieldwatch phase 1
+on:
+  pull_request:
+    paths: ['art-fieldwatch-phase1/**', '.github/workflows/art-fieldwatch-phase1.yml']
+  workflow_dispatch:
+    inputs:
+      arm64:
+        description: 'Run experimental arm64 JIT hook test'
+        type: boolean
+        default: false
+permissions:
+  contents: read
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: node --check art-fieldwatch-phase1/jit-boundary-probe.js
+      - run: python3 -m py_compile art-fieldwatch-phase1/ci/smoke_test.py
+      - run: bash -n art-fieldwatch-phase1/ci/run-emulator-smoke.sh
+  android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        api: [33, 34]
+    env:
+      FRIDA_VERSION: '17.27.1'
+      ARTWATCH_LOG_DIR: /tmp/artwatch-logs
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: android-actions/setup-android@v3
+      - run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.10.2'
+      - run: gradle -p art-fieldwatch-phase1/test :app:assembleDebug --no-daemon
+      - run: python3 -m pip install 'frida==17.27.1'
+      - uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: ${{ matrix.api }}
+          target: default
+          arch: x86_64
+          profile: pixel_2
+          script: bash art-fieldwatch-phase1/ci/run-emulator-smoke.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: artwatch-api${{ matrix.api }}-x86_64
+          path: /tmp/artwatch-logs/
+          if-no-files-found: ignore
+  android-arm64:
+    if: github.event_name == 'workflow_dispatch' && inputs.arm64
+    runs-on: macos-15-arm64
+    timeout-minutes: 45
+    env:
+      FRIDA_VERSION: '17.27.1'
+      ARTWATCH_LOG_DIR: /tmp/artwatch-logs
+      ARTWATCH_REQUIRE_JIT: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: android-actions/setup-android@v3
+      - run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.10.2'
+      - run: gradle -p art-fieldwatch-phase1/test :app:assembleDebug --no-daemon
+      - run: python3 -m pip install 'frida==17.27.1'
+      - uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          target: google_apis
+          arch: arm64-v8a
+          profile: pixel_2
+          script: bash art-fieldwatch-phase1/ci/run-emulator-smoke.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: artwatch-api34-arm64
+          path: /tmp/artwatch-logs/
+          if-no-files-found: ignore
