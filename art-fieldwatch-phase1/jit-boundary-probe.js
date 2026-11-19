@@ -69,6 +69,16 @@ function main() {
   const modules = Process.enumerateModules().filter(m => artNames.has(m.name));
   if (modules.length === 0) { log('No ART library found'); return; }
   for (const m of modules) log('module='+m.name+' base='+m.base+' path='+m.path);
+  // x86_64 CI is an ART/Frida smoke test, not a native JIT symbol test.
+  // Avoid enumerateSymbols() here: on API 34 the previous probe disconnected
+  // immediately after printing the ART module list. The exact cause is
+  // unconfirmed; this keeps potentially unsafe symbol enumeration isolated.
+  if (Process.arch !== 'arm64' || (api !== 33 && api !== 34)) {
+    log('Inventory complete; skipping deep symbol scan on this platform');
+    log('This probe does NOT capture field accesses or modify compiler IR');
+    return;
+  }
+  log('ARM64 experimental symbol discovery starting');
   const sites = modules.flatMap(discover);
   for (const s of sites) log('candidate='+s.type+' at='+s.address+
     ' module='+s.module+' source='+s.source+' symbol='+s.name);
