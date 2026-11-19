@@ -29,6 +29,9 @@ if [ "$ready" -ne 1 ]; then
   adb shell cat /data/local/tmp/artwatch-frida-server.log || true
   exit 1
 fi
+# Pull ART ELF files for offline symbol inspection; never scan their full
+# symbol tables inside the injected application.
+bash art-fieldwatch-phase1/ci/art-binary-inventory.sh || true
 if ! python3 art-fieldwatch-phase1/ci/smoke_test.py; then
   adb shell cat /data/local/tmp/artwatch-frida-server.log || true
   adb logcat -d -t 1500 > "$ARTWATCH_LOG_DIR/logcat-failure.txt" || true
