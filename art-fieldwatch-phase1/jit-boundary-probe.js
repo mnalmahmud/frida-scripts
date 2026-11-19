@@ -68,7 +68,19 @@ function main() {
   log('pid='+Process.id+' arch='+Process.arch+' pointerSize='+Process.pointerSize+' api='+api);
   const modules = Process.enumerateModules().filter(m => artNames.has(m.name));
   if (modules.length === 0) { log('No ART library found'); return; }
-  for (const m of modules) log('module='+m.name+' base='+m.base+' path='+m.path);
+  for (const m of modules) {
+    log('module='+m.name+' base='+m.base+' path='+m.path);
+    // Dynamic exports only. Unlike enumerateSymbols(), this avoids scanning
+    // the full ELF symbol table on production ART.
+    try {
+      const candidates = m.enumerateExports().filter(e =>
+        /jit_load|jit_compile_method|jit_compiler_|CompileMethod/.test(e.name));
+      log('exports=' + m.name + ' matches=' + candidates.length);
+      for (const e of candidates.slice(0, 30))
+        log('export=' + m.name + ' name=' + e.name + ' address=' + e.address);
+      if (candidates.length > 30) log('export-list-truncated=' + m.name);
+    } catch (e) { log('export-enumeration-error=' + m.name + ': ' + e.message); }
+  }
   // x86_64 CI is an ART/Frida smoke test, not a native JIT symbol test.
   // Avoid enumerateSymbols() here: on API 34 the previous probe disconnected
   // immediately after printing the ART module list. The exact cause is
