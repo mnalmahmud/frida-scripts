@@ -81,38 +81,57 @@ function main() {
       if (candidates.length > 30) log('export-list-truncated=' + m.name);
     } catch (e) { log('export-enumeration-error=' + m.name + ': ' + e.message); }
   }
-  // x86_64 CI is an ART/Frida smoke test, not a native JIT symbol test.
-  // Avoid enumerateSymbols() here: on API 34 the previous probe disconnected
-  // immediately after printing the ART module list. The exact cause is
-  // unconfirmed; this keeps potentially unsafe symbol enumeration isolated.
-  if (Process.arch !== 'arm64' || (api !== 33 && api !== 34)) {
-    log('Inventory complete; skipping deep symbol scan on this platform');
-    log('This probe does NOT capture field accesses or modify compiler IR');
-    return;
-  }
-  log('ARM64 experimental symbol discovery starting');
-  const sites = modules.flatMap(discover);
-  for (const s of sites) log('candidate='+s.type+' at='+s.address+
-    ' module='+s.module+' source='+s.source+' symbol='+s.name);
-  if (Process.arch !== 'arm64' || (api !== 33 && api !== 34)) {
-    log('Inventory only: JIT callback requires API 33/34 arm64');
-    return;
-  }
-  const pick = t => sites.find(s => s.type === t);
-  const chosen = api === 34
-    ? (pick('jit_dispatch_internal') || pick('jit_dispatch'))
-    : (pick('jit_dispatch') || pick('jit_dispatch_internal'));
-  try {
-    if (chosen) attachDispatch(chosen);
-    else log('No ABI-checked C++ JIT dispatch symbol discovered');
-  } catch(e) { log('Hook installation failed: '+e.stack); }
-  log('This probe does NOT capture field accesses or modify compiler IR');
-  let before = 0;
-  setInterval(() => {
-    if (counts.attempts !== before) {
-      before = counts.attempts;
-      log('summary '+JSON.stringify(counts));
+
+  // Observe exported C++ compilation functions, using mangled ELF names.
+  const candidates = [];
+  for (const m of modules) {
+    for (const e of m.enumerateExports()) {
+      if (e.type !== 'function') continue;
+      let layer = null;
+      if (e.name.startsWith('_ZN3art3jit3Jit13CompileMethodE'))
+        layer = 'runtime';
+      else if (e.name.startsWith('_ZN3art3jit11JitCompiler13CompileMethodE'))
+        layer = 'compiler';
+      if (layer !== null) {
+        candidates.push({layer,address:e.address,name:e.name,module:m.name});
+        log('compilation-export=' + layer + ' name=' + e.name + ' at=' + e.address);
+      }
     }
-  }, 5000);
+  }
+  if (!['x64','arm64'].includes(Process.arch) || ![33,34].includes(api)) {
+    log('Inventory only: compiler ABI not yet validated for this profile');
+    return;
+  }
+  const limits = {runtime:0,compiler:0};
+  let hooked = 0;
+  for (const layer of ['runtime','compiler']) {
+    const site = candidates.find(c => c.layer === layer);
+    if (!site) continue;
+    try {
+      Interceptor.attach(site.address, {
+        onEnter(args) {
+          // Runtime: this, ArtMethod*, Thread*, CompilationKind, bool
+          // Compiler: this, Thread*, JitMemoryRegion*, ArtMethod*, CompilationKind
+          this.method = (layer === 'runtime' ? args[1] : args[3]).toString();
+          this.compilationKind = (layer === 'runtime' ? args[3] : args[4]).toInt32();
+        },
+        onLeave(ret) {
+          limits[layer]++;
+          const event = {type:'artwatch-jit',layer,method:this.method,
+            kind:this.compilationKind,success:ret.toInt32() !== 0};
+          send(event);
+          if (limits[layer] <= 25) log('JIT ' + JSON.stringify(event));
+        }
+      });
+      hooked++;
+      log('Attached compilation observer: ' + layer + ' at=' + site.address);
+      send({type:'artwatch-hook-attached',layer,name:site.name});
+    } catch (e) {
+      log('JIT hook failed for ' + layer + ': ' + e.stack);
+    }
+  }
+  log('compile-hooks=' + hooked);
+  log('No field interception or compiler IR mutation implemented');
+
 }
 main();

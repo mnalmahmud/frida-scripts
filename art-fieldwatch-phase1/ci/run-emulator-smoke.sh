@@ -18,5 +18,19 @@ xz -df /tmp/frida-server.xz
 adb push /tmp/frida-server /data/local/tmp/frida-server
 adb shell chmod 755 /data/local/tmp/frida-server
 adb shell '(/data/local/tmp/frida-server >/data/local/tmp/artwatch-frida-server.log 2>&1 < /dev/null &)'
-sleep 3
-python3 art-fieldwatch-phase1/ci/smoke_test.py
+# Check that frida-server actually survives startup.
+ready=0
+for i in $(seq 1 12); do
+  if adb shell pidof frida-server >/dev/null 2>&1; then ready=1; break; fi
+  sleep 2
+done
+if [ "$ready" -ne 1 ]; then
+  echo "Frida server is not running"
+  adb shell cat /data/local/tmp/artwatch-frida-server.log || true
+  exit 1
+fi
+if ! python3 art-fieldwatch-phase1/ci/smoke_test.py; then
+  adb shell cat /data/local/tmp/artwatch-frida-server.log || true
+  adb logcat -d -t 1500 > "$ARTWATCH_LOG_DIR/logcat-failure.txt" || true
+  exit 1
+fi

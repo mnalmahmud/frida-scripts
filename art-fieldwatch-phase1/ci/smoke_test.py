@@ -27,6 +27,7 @@ def on_message(message,data):
 def main():
     device = frida.get_usb_device(timeout=30)
     record('host','frida-device='+device.name)
+    record('host','frida-process-count='+str(len(device.enumerate_processes())))
     pid = device.spawn(['com.example.artfieldwatch'])
     record('host','spawned-pid='+str(pid))
     session = device.attach(pid)
@@ -55,6 +56,14 @@ def main():
             raise AssertionError('No native JIT hook installed')
         if 'JIT success' not in text:
             raise AssertionError('No JIT compile observed')
+    hooked = [e for e in messages if e['kind']=='frida' and
+              '"artwatch-hook-attached"' in e['text']]
+    compiled = [e for e in messages if e['kind']=='frida' and
+                '"artwatch-jit"' in e['text']]
+    record('host',f'JIT hooks={len(hooked)} compilation events={len(compiled)}')
+    if os.environ.get('ARTWATCH_REQUIRE_JIT') == '1':
+        if not hooked: raise AssertionError('JIT compiler hook not installed')
+        if not compiled: raise AssertionError('No compilation events observed')
     record('host','PASS: Frida attach + ART discovery + fixture warmup')
 
 if __name__ == '__main__':
