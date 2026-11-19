@@ -72,6 +72,34 @@ def main():
         # When an internal hook exists, it must actually execute.
         if any('"runtime_internal"' in h for h in hooked) and not internal:
             raise AssertionError('Internal runtime hook installed but did not execute')
+    if required and 'api=33' in text and 'arch=x64' in text:
+        # This binary exports both boundaries; require actual callbacks.
+        payloads = []
+        for e in messages:
+            if e['kind'] != 'frida':
+                continue
+            try:
+                m = json.loads(e['text'])
+                if m.get('type') == 'send' and isinstance(m.get('payload'), dict):
+                    payloads.append(m['payload'])
+            except (ValueError, TypeError):
+                continue
+        graph_hooks = {v.get('layer') for v in payloads
+                       if v.get('type') == 'artwatch-hook-attached'
+                       and v.get('layer') in ('graph_builder','pre_opt')}
+        built = [v for v in payloads if v.get('type') == 'artwatch-graph'
+                 and v.get('phase') == 'build-complete']
+        preopt = [v for v in payloads if v.get('type') == 'artwatch-graph'
+                  and v.get('phase') == 'pre-opt']
+        matched = [v for v in preopt if v.get('graphMatchesBuilder') is True]
+        record('host',f'graph hooks={sorted(graph_hooks)} built={len(built)} '
+               f'pre-opt={len(preopt)} pointer-matches={len(matched)}')
+        if graph_hooks != {'graph_builder','pre_opt'}:
+            raise AssertionError('API 33 graph boundaries not both attached')
+        if not built or not preopt:
+            raise AssertionError('API 33 graph construction/pre-optimization callback missing')
+        if not matched:
+            raise AssertionError('No graph pointer correlation between the boundaries')
     record('host','PASS: Frida attach + ART discovery + fixture warmup')
 
 if __name__ == '__main__':

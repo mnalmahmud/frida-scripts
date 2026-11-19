@@ -4,7 +4,10 @@ const TAG = '[art-fieldwatch/phase1] ';
 const SAMPLE_LIMIT = 60;
 const artLibraries = new Set(['libart.so', 'libartd.so', 'libart-compiler.so', 'libartd-compiler.so']);
 const log = s => console.log(TAG + s);
-const count = {runtime_internal: 0, compiler: 0};
+const count = {runtime_internal: 0, compiler: 0, graph_builder: 0, pre_opt: 0};
+// Track the method being compiled per native thread, only while compilation runs.
+const compiling = new Map();
+const builtByThread = new Map();
 function sdkLevel() {
   try {
     const p = Process.getModuleByName('libc.so').findExportByName('__system_property_get');
@@ -19,7 +22,9 @@ const NAMES = {
   internal: '_ZN3art3jit3Jit21CompileMethodInternalEPNS_9ArtMethodEPNS_6ThreadENS_15CompilationKindEb',
   publicCompile: '_ZN3art3jit3Jit13CompileMethodEPNS_9ArtMethodEPNS_6ThreadENS_15CompilationKindEb',
   compiler: '_ZN3art3jit11JitCompiler13CompileMethodEPNS_6ThreadEPNS0_15JitMemoryRegionEPNS_9ArtMethodENS_15CompilationKindE',
-  instance: '_ZN3art3jit3Jit13jit_compiler_E'
+  instance: '_ZN3art3jit3Jit13jit_compiler_E',
+  buildGraph: '_ZN3art13HGraphBuilder10BuildGraphEv',
+  runOptimizations: '_ZNK3art18OptimizingCompiler16RunOptimizationsEPNS_6HGraphEPNS_13CodeGeneratorERKNS_18DexCompilationUnitEPNS_12PassObserverE'
 };
 function getExport(module, exactName) {
   const address = module.findExportByName(exactName);
@@ -62,11 +67,22 @@ function attach(layer, site) {
         this.method = (layer === 'compiler' ? args[3] : args[1]).toString();
         this.compilationKind = (layer === 'compiler' ? args[4] : args[3]).toInt32();
         this.ordinal = ++count[layer];
+        if (layer === 'compiler') {
+          this.nativeThread = this.threadId;
+          this.previousCompilation = compiling.get(this.nativeThread);
+          compiling.set(this.nativeThread, {method: this.method, kind: this.compilationKind});
+          builtByThread.delete(this.nativeThread);
+        }
         if (this.ordinal <= SAMPLE_LIMIT)
           log('JIT enter layer=' + layer + ' method=' + this.method +
               ' kind=' + this.compilationKind);
       },
       onLeave(ret) {
+        if (layer === 'compiler') {
+          if (this.previousCompilation) compiling.set(this.nativeThread, this.previousCompilation);
+          else compiling.delete(this.nativeThread);
+          builtByThread.delete(this.nativeThread);
+        }
         const event = {type: 'artwatch-jit', layer, method: this.method,
           kind: this.compilationKind, success: ret.toInt32() !== 0,
           ordinal: this.ordinal};
@@ -85,6 +101,62 @@ function attach(layer, site) {
     return false;
   }
 }
+// API 33 x86_64 only. Exact exported symbols were confirmed by readelf
+// on the emulator binary. Observe graph identities; never mutate ART memory.
+function attachGraphBoundary(layer, site) {
+  try {
+    Interceptor.attach(site.address, {
+      onEnter(args) {
+        this.nativeThread = this.threadId;
+        this.ordinal = ++count[layer];
+        const active = compiling.get(this.nativeThread);
+        this.method = active ? active.method : null;
+        this.kind = active ? active.kind : null;
+        if (layer === 'graph_builder') {
+          this.builder = args[0].toString();
+          // AOSP HGraphBuilder derives from ValueObject and its first member is
+          // graph_. This is an ABI-specific C++ layout hypothesis to validate.
+          try { this.graphCandidate = args[0].readPointer().toString(); }
+          catch (_) { this.graphCandidate = null; }
+        } else {
+          // const OptimizingCompiler* this, HGraph*, CodeGenerator*, ...
+          this.graph = args[1].toString();
+          const previous = builtByThread.get(this.nativeThread);
+          const matches = previous && previous.graphCandidate !== null
+            ? previous.graphCandidate === this.graph : null;
+          const event = {type: 'artwatch-graph', phase: 'pre-opt',
+            ordinal: this.ordinal, thread: this.nativeThread,
+            method: this.method, kind: this.kind, graph: this.graph,
+            builderGraph: previous ? previous.graphCandidate : null,
+            graphMatchesBuilder: matches};
+          if (this.ordinal <= SAMPLE_LIMIT) {
+            send(event);
+            log('GRAPH ' + JSON.stringify(event));
+          }
+        }
+      },
+      onLeave(_retval) {
+        if (layer !== 'graph_builder') return;
+        builtByThread.set(this.nativeThread, {graphCandidate: this.graphCandidate});
+        const event = {type: 'artwatch-graph', phase: 'build-complete',
+          ordinal: this.ordinal, thread: this.nativeThread,
+          method: this.method, kind: this.kind, builder: this.builder,
+          graphCandidate: this.graphCandidate};
+        if (this.ordinal <= SAMPLE_LIMIT) {
+          send(event);
+          log('GRAPH ' + JSON.stringify(event));
+        }
+      }
+    });
+    log('Attached graph observer: ' + layer + ' via=export at=' + site.address);
+    send({type: 'artwatch-hook-attached', layer, source: 'export',
+      address: site.address.toString()});
+    return true;
+  } catch (e) {
+    log('Graph hook failed for ' + layer + ': ' + (e.stack || e));
+    return false;
+  }
+}
 function main() {
   const api = sdkLevel();
   log('pid=' + Process.id + ' arch=' + Process.arch +
@@ -95,7 +167,8 @@ function main() {
     // Targeted export lookup avoids potentially fragile full export-table scans
     // in injected processes (especially API 33 in earlier CI attempts).
     for (const name of [NAMES.internal, NAMES.publicCompile,
-                        NAMES.compiler, NAMES.instance, 'jit_load']) {
+                        NAMES.compiler, NAMES.instance, NAMES.buildGraph,
+                        NAMES.runOptimizations, 'jit_load']) {
       try {
         const site = getExport(module, name);
         if (site) log('export=' + module.name + ' name=' + name +
@@ -132,6 +205,19 @@ function main() {
       : fromVtable;
     if (site) hooked += Number(attach('compiler', site));
     else log('compiler-boundary=not-found');
+  }
+  // Strictly gate read-only compiler IR observation to the tested export profile.
+  if (api === 33 && Process.arch === 'x64' && compiler) {
+    for (const [layer, name] of [
+      ['graph_builder', NAMES.buildGraph],
+      ['pre_opt', NAMES.runOptimizations]
+    ]) {
+      const site = getExport(compiler, name);
+      if (site) attachGraphBoundary(layer, site);
+      else log('graph-boundary-not-exported=' + layer);
+    }
+  } else {
+    log('graph-boundaries=disabled (unverified binary profile)');
   }
   log('compile-hooks=' + hooked);
   log('No field interception or compiler IR mutation implemented');
