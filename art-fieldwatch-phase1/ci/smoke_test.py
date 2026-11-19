@@ -51,19 +51,24 @@ def main():
     if errors: raise AssertionError('Frida errors: '+'; '.join(errors))
     if 'WARMUP_FAILED' in logs.stdout or 'WARMUP_DONE' not in logs.stdout:
         raise AssertionError('APK fixture warmup failed or timed out')
-    if os.environ.get('ARTWATCH_REQUIRE_JIT') == '1':
-        if 'Attached compilation observer' not in text:
-            raise AssertionError('No native JIT hook installed')
-        if 'JIT success' not in text:
-            raise AssertionError('No JIT compile observed')
-    hooked = [e for e in messages if e['kind']=='frida' and
+    hooked = [e['text'] for e in messages if e['kind']=='frida' and
               '"artwatch-hook-attached"' in e['text']]
-    compiled = [e for e in messages if e['kind']=='frida' and
+    compiled = [e['text'] for e in messages if e['kind']=='frida' and
                 '"artwatch-jit"' in e['text']]
     record('host',f'JIT hooks={len(hooked)} compilation events={len(compiled)}')
-    if os.environ.get('ARTWATCH_REQUIRE_JIT') == '1':
-        if not hooked: raise AssertionError('JIT compiler hook not installed')
-        if not compiled: raise AssertionError('No compilation events observed')
+    required = os.environ.get('ARTWATCH_REQUIRE_JIT') == '1'
+    if required:
+        # Assert the actual worker entry, not the exported Jit::CompileMethod()
+        # path bypassed by ordinary JitCompileTask execution.
+        if not any('"runtime_internal"' in h for h in hooked):
+            raise AssertionError('Jit::CompileMethodInternal interceptor not installed')
+        if not any('"compiler"' in h for h in hooked):
+            raise AssertionError('JitCompilerInterface::CompileMethod interceptor not installed')
+        internal = [e for e in compiled if '"runtime_internal"' in e]
+        compiler = [e for e in compiled if '"compiler"' in e]
+        record('host',f'JIT runtime_internal events={len(internal)} compiler events={len(compiler)}')
+        if not internal or not compiler:
+            raise AssertionError('Missing JIT compilation callbacks from required layers')
     record('host','PASS: Frida attach + ART discovery + fixture warmup')
 
 if __name__ == '__main__':
