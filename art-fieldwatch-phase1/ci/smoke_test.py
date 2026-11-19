@@ -33,6 +33,7 @@ def main():
     try:
         script = session.create_script((BASE/'jit-boundary-probe.js').read_text())
         script.on('message',on_message)
+        script.set_log_handler(lambda level, line: record('console-'+level, line))
         script.load()
         device.resume(pid)
         time.sleep(20)
