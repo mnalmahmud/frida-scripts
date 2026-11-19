@@ -44,3 +44,20 @@ No global or selective deoptimization, Stalker or watchpoints.
 
 Source: https://android.googlesource.com/platform/art/
 Frida: https://github.com/frida/frida-java-bridge
+
+## First field-builder experiment (API 33 x86_64)
+
+ART instruction builder has non-inline `BuildInstanceFieldAccess` and
+`BuildStaticFieldAccess` methods in AOSP. The probe now resolves the exact
+candidate mangled exports; only addresses actually found in the device's
+compiler library are hooked. It records DEX PC, read/write direction,
+the raw field-index code unit (not a resolved field identity), the
+active ArtMethod pointer, compilation kind, and builder graph pointer.
+
+A minimal Java fixture performs `value = x; return value;` and runs hot
+enough to induce JIT compilation. CI requires an actual instance read and
+write compiler callback tied to a live graph. This is read-only:
+there is no actual run-time Java field event and no IR mutation.
+
+No field-builder hooks or event counts have been validated until this
+commit's emulator jobs complete.

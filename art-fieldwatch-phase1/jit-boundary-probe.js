@@ -8,6 +8,9 @@ const count = {runtime_internal: 0, compiler: 0, graph_builder: 0, pre_opt: 0};
 // Track the method being compiled per native thread, only while compilation runs.
 const compiling = new Map();
 const builtByThread = new Map();
+const activeGraphBuild = new Map();
+const FIELD_SAMPLE_LIMIT = 140;
+const fieldCounts = {instance: 0, static: 0};
 function sdkLevel() {
   try {
     const p = Process.getModuleByName('libc.so').findExportByName('__system_property_get');
@@ -24,7 +27,11 @@ const NAMES = {
   compiler: '_ZN3art3jit11JitCompiler13CompileMethodEPNS_6ThreadEPNS0_15JitMemoryRegionEPNS_9ArtMethodENS_15CompilationKindE',
   instance: '_ZN3art3jit3Jit13jit_compiler_E',
   buildGraph: '_ZN3art13HGraphBuilder10BuildGraphEv',
-  runOptimizations: '_ZNK3art18OptimizingCompiler16RunOptimizationsEPNS_6HGraphEPNS_13CodeGeneratorERKNS_18DexCompilationUnitEPNS_12PassObserverE'
+  runOptimizations: '_ZNK3art18OptimizingCompiler16RunOptimizationsEPNS_6HGraphEPNS_13CodeGeneratorERKNS_18DexCompilationUnitEPNS_12PassObserverE',
+  // Candidate exported signatures from instruction_builder.cc. Only use if
+  // this exact ELF symbol exists on the running device.
+  fieldInstance: '_ZN3art19HInstructionBuilder24BuildInstanceFieldAccessERKNS_11InstructionEjbm',
+  fieldStatic: '_ZN3art19HInstructionBuilder22BuildStaticFieldAccessERKNS_11InstructionEjb'
 };
 function getExport(module, exactName) {
   const address = module.findExportByName(exactName);
@@ -118,6 +125,8 @@ function attachGraphBoundary(layer, site) {
           // graph_. This is an ABI-specific C++ layout hypothesis to validate.
           try { this.graphCandidate = args[0].readPointer().toString(); }
           catch (_) { this.graphCandidate = null; }
+          this.previousGraphBuild = activeGraphBuild.get(this.nativeThread);
+          activeGraphBuild.set(this.nativeThread, this.graphCandidate);
         } else {
           // const OptimizingCompiler* this, HGraph*, CodeGenerator*, ...
           this.graph = args[1].toString();
@@ -137,6 +146,8 @@ function attachGraphBoundary(layer, site) {
       },
       onLeave(_retval) {
         if (layer !== 'graph_builder') return;
+        if (this.previousGraphBuild === undefined) activeGraphBuild.delete(this.nativeThread);
+        else activeGraphBuild.set(this.nativeThread, this.previousGraphBuild);
         builtByThread.set(this.nativeThread, {graphCandidate: this.graphCandidate});
         const event = {type: 'artwatch-graph', phase: 'build-complete',
           ordinal: this.ordinal, thread: this.nativeThread,
@@ -157,6 +168,47 @@ function attachGraphBoundary(layer, site) {
     return false;
   }
 }
+// Observe DEX field operations as the compiler builds their IR.
+// This does NOT identify HInstanceFieldGet/HInstanceFieldSet objects yet.
+// It only provides a pre-optimization DEX PC + access-direction signal.
+function attachFieldBuilder(access, site) {
+  try {
+    Interceptor.attach(site.address, {
+      onEnter(args) {
+        const thread = this.threadId;
+        const active = compiling.get(thread);
+        if (!active) return;
+        const ordinal = ++fieldCounts[access];
+        if (ordinal > FIELD_SAMPLE_LIMIT) return;
+        const instruction = args[1];
+        let opcode = null;
+        let fieldIndexRaw = null;
+        try {
+          // DEX formats 22c (iget/iput) and 21c (sget/sput):
+          // opcode is byte 0; the two-byte C/B index occupies code unit 1.
+          opcode = instruction.readU8();
+          fieldIndexRaw = instruction.add(2).readU16();
+        } catch (e) {
+          log('field-instruction-read-failed=' + e);
+        }
+        const event = {type: 'artwatch-field-build', access,
+          method: active.method, compilationKind: active.kind, thread,
+          graphCandidate: activeGraphBuild.get(thread) || null,
+          dexPc: args[2].toUInt32(), isPut: args[3].toInt32() !== 0,
+          opcode, fieldIndexRaw, ordinal};
+        send(event);
+        log('FIELD_BUILD ' + JSON.stringify(event));
+      }
+    });
+    log('Attached field-builder observer: ' + access + ' at=' + site.address);
+    send({type: 'artwatch-hook-attached', layer: 'field_' + access,
+      source: 'export', address: site.address.toString()});
+    return true;
+  } catch (e) {
+    log('field-builder-hook-error=' + access + ': ' + (e.stack || e));
+    return false;
+  }
+}
 function main() {
   const api = sdkLevel();
   log('pid=' + Process.id + ' arch=' + Process.arch +
@@ -168,7 +220,8 @@ function main() {
     // in injected processes (especially API 33 in earlier CI attempts).
     for (const name of [NAMES.internal, NAMES.publicCompile,
                         NAMES.compiler, NAMES.instance, NAMES.buildGraph,
-                        NAMES.runOptimizations, 'jit_load']) {
+                        NAMES.runOptimizations, NAMES.fieldInstance,
+                        NAMES.fieldStatic, 'jit_load']) {
       try {
         const site = getExport(module, name);
         if (site) log('export=' + module.name + ' name=' + name +
@@ -215,6 +268,14 @@ function main() {
       const site = getExport(compiler, name);
       if (site) attachGraphBoundary(layer, site);
       else log('graph-boundary-not-exported=' + layer);
+    }
+    for (const [access, name] of [
+      ['instance', NAMES.fieldInstance],
+      ['static', NAMES.fieldStatic]
+    ]) {
+      const site = getExport(compiler, name);
+      if (site) attachFieldBuilder(access, site);
+      else log('field-builder-not-exported=' + access);
     }
   } else {
     log('graph-boundaries=disabled (unverified binary profile)');

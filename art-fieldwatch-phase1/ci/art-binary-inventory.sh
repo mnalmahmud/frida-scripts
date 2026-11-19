@@ -23,7 +23,7 @@ abi="$(adb shell getprop ro.product.cpu.abi | tr -d '\r')"
     readelf -SW "$tmp/$library" 2>&1 | grep -E ' (\.symtab|\.dynsym|\.debug_info|\.gnu_debugdata) ' || true
     echo "-- targeted symbols (dynamic and full, if available) --"
     readelf -Ws "$tmp/$library" 2>&1 |
-      grep -E 'HGraphBuilder|OptimizingCompiler|TryCompile|RunOptimizations|PassObserver|JitCompiler.*CompileMethod|jit_load|CompileMethodInternal' |
+      grep -E 'HGraphBuilder|OptimizingCompiler|TryCompile|RunOptimizations|PassObserver|JitCompiler.*CompileMethod|jit_load|CompileMethodInternal|BuildInstanceFieldAccess|BuildStaticFieldAccess|HInstanceField(Get|Set)|HStaticField(Get|Set)' |
       head -n 80 || true
     echo "-- summary --"
     if readelf -SW "$tmp/$library" | grep -q ' \.symtab '; then

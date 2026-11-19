@@ -16,6 +16,7 @@ public final class MainActivity extends Activity {
    try {
     for (int i = 0; i < 40; i++)
      accumulator += FieldWatchTarget.exercise(100000);
+    accumulator += FieldIRTarget.warmup(150000);
     Log.i("ARTWATCH_CI","WARMUP_DONE checksum=" + accumulator);
    } catch (Throwable t) {
     Log.e("ARTWATCH_CI","WARMUP_FAILED",t);

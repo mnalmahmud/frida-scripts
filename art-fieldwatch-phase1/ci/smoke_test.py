@@ -100,6 +100,27 @@ def main():
             raise AssertionError('API 33 graph construction/pre-optimization callback missing')
         if not matched:
             raise AssertionError('No graph pointer correlation between the boundaries')
+        field_hooks = {v.get('layer') for v in payloads
+                       if v.get('type') == 'artwatch-hook-attached'
+                       and v.get('layer') in ('field_instance','field_static')}
+        field_events = [v for v in payloads
+                        if v.get('type') == 'artwatch-field-build']
+        instance_reads = [v for v in field_events
+                          if v.get('access') == 'instance' and v.get('isPut') is False]
+        instance_writes = [v for v in field_events
+                           if v.get('access') == 'instance' and v.get('isPut') is True]
+        linked = [v for v in field_events
+                  if v.get('graphCandidate') and v.get('method') and
+                     isinstance(v.get('dexPc'), int)]
+        record('host',f'field hooks={sorted(field_hooks)} events={len(field_events)} '
+               f'instance-reads={len(instance_reads)} instance-writes={len(instance_writes)} '
+               f'graph-linked={len(linked)}')
+        if 'field_instance' not in field_hooks:
+            raise AssertionError('API 33 instance field-builder hook not installed')
+        if not instance_reads or not instance_writes:
+            raise AssertionError('Missing compiled instance-field get/set DEX build callbacks')
+        if not linked:
+            raise AssertionError('No field-builder event correlated with a live HGraph')
     record('host','PASS: Frida attach + ART discovery + fixture warmup')
 
 if __name__ == '__main__':
