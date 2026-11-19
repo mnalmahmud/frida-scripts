@@ -1,137 +1,130 @@
 'use strict';
-/* Read-only JIT-boundary discovery. Does NOT intercept field reads/writes. */
-const LIMIT = 40;
-const counts = {attempts: 0, successes: 0, failures: 0};
-const hooks = [];
-const artNames = new Set(['libart.so','libartd.so','libart-compiler.so','libartd-compiler.so']);
-const log = x => console.log('[art-fieldwatch/phase1] ' + x);
+// Read-only ART JIT interception probe; no field interception or IR mutation.
+const TAG = '[art-fieldwatch/phase1] ';
+const SAMPLE_LIMIT = 60;
+const artLibraries = new Set(['libart.so', 'libartd.so', 'libart-compiler.so', 'libartd-compiler.so']);
+const log = s => console.log(TAG + s);
+const count = {runtime_internal: 0, compiler: 0};
 function sdkLevel() {
   try {
     const p = Process.getModuleByName('libc.so').findExportByName('__system_property_get');
-    if (p === null) return '?';
-    const fn = new NativeFunction(p,'int',['pointer','pointer']);
-    const out = Memory.alloc(128);
-    return fn(Memory.allocUtf8String('ro.build.version.sdk'),out) > 0
-      ? out.readUtf8String() : '?';
-  } catch (_) { return '?'; }
+    if (p === null) return NaN;
+    const get = new NativeFunction(p, 'int', ['pointer', 'pointer']);
+    const buf = Memory.alloc(128);
+    const rc = get(Memory.allocUtf8String('ro.build.version.sdk'), buf);
+    return rc > 0 ? Number(buf.readUtf8String()) : NaN;
+  } catch (e) { log('sdk-error=' + e); return NaN; }
 }
-function kind(n) {
-  if (/\bJit::CompileMethodInternal\(/.test(n)) return 'jit_dispatch_internal';
-  if (/\bJit::CompileMethod\(/.test(n)) return 'jit_dispatch';
-  if (/\bOptimizingCompiler::JitCompile\(/.test(n)) return 'optimizing_jit';
-  if (/\bOptimizingCompiler::TryCompile\(/.test(n)) return 'optimizing_preopt_candidate';
-  if (/\bHGraphBuilder::BuildGraph\(/.test(n)) return 'graph_builder';
-  if (/\bJitCodeCache::Commit\(/.test(n)) return 'code_publication';
-  if (n === 'jit_load') return 'jit_load';
-  return null;
+function getExport(module, prefix) {
+  return module.enumerateExports().find(e => e.type === 'function' && e.name.startsWith(prefix));
 }
-function discover(m) {
-  const result = [];
-  const seen = new Set();
-  const add = (name,address,source) => {
-    const type = kind(name);
-    if (type === null) return;
-    const key = type + ':' + address;
-    if (seen.has(key)) return;
-    seen.add(key);
-    result.push({type,name,address,source,module:m.name});
-  };
-  const exp = m.findExportByName('jit_load');
-  if (exp !== null) add('jit_load',exp,'export');
+function compilerViaVtable(runtime, compiler) {
+  // This is an ABI-specific experiment, NOT a generic C++ vtable scanner.
+  // In the AOSP JitCompilerInterface declaration, virtual ~JitCompilerInterface()
+  // is followed by virtual CompileMethod(). For the Itanium C++ ABI used by
+  // Android x86_64/arm64, the destructor occupies slots 0/1 and CompileMethod slot 2.
+  const symbol = runtime.enumerateExports().find(e =>
+    e.name === '_ZN3art3jit3Jit13jit_compiler_E');
+  if (!symbol) { log('compiler-vtable=unavailable (jit_compiler_ not exported)'); return null; }
   try {
-    for (const s of m.enumerateSymbols()) {
-      if (s.type === 'function' || s.type === undefined)
-        add(s.name,s.address,'symbol');
+    const instance = symbol.address.readPointer(); // Existing compiler instance; NEVER call jit_load().
+    if (instance.isNull()) { log('compiler-vtable=unavailable (instance null)'); return null; }
+    const vtable = instance.readPointer();
+    const vtableOwner = Process.findModuleByAddress(vtable);
+    if (!vtableOwner || vtableOwner.name !== compiler.name) {
+      log('compiler-vtable=rejected (vtable outside ' + compiler.name + ')');
+      return null;
     }
-  } catch (e) { log('Cannot enumerate symbols in ' + m.name + ': ' + e.message); }
-  return result;
+    const fn = vtable.add(2 * Process.pointerSize).readPointer();
+    const fnOwner = Process.findModuleByAddress(fn);
+    if (!fnOwner || fnOwner.name !== compiler.name) {
+      log('compiler-vtable=rejected (slot2 outside ' + compiler.name + ')');
+      return null;
+    }
+    log('compiler-vtable instance=' + instance + ' vtable=' + vtable + ' slot2=' + fn);
+    return {address: fn, name: 'JitCompilerInterface::CompileMethod [vtable slot2]',
+      source: 'vtable-slot2'};
+  } catch (e) { log('compiler-vtable-error=' + e); return null; }
 }
-function attachDispatch(site) {
-  hooks.push(Interceptor.attach(site.address, {
-    onEnter(args) {
-      this.method = args[1];
-      this.kind = args[3].toInt32();
-      counts.attempts++;
-      this.print = counts.attempts <= LIMIT;
-    },
-    onLeave(ret) {
-      const ok = ret.toInt32() !== 0;
-      counts[ok ? 'successes' : 'failures']++;
-      if (this.print) log('JIT ' + (ok?'success':'failed') +
-         ' method=' + this.method + ' kind=' + this.kind);
-    }
-  }));
-  log('Attached compilation observer at ' + site.address + ' (' + site.name + ')');
+function attach(layer, site) {
+  try {
+    Interceptor.attach(site.address, {
+      onEnter(args) {
+        // x86_64/arm64 non-static member calls: args[0] is this.
+        // Internal: (this, ArtMethod*, Thread*, CompilationKind, bool).
+        // Compiler: (this, Thread*, JitMemoryRegion*, ArtMethod*, CompilationKind).
+        this.method = (layer === 'compiler' ? args[3] : args[1]).toString();
+        this.compilationKind = (layer === 'compiler' ? args[4] : args[3]).toInt32();
+        this.ordinal = ++count[layer];
+        if (this.ordinal <= SAMPLE_LIMIT)
+          log('JIT enter layer=' + layer + ' method=' + this.method +
+              ' kind=' + this.compilationKind);
+      },
+      onLeave(ret) {
+        const event = {type: 'artwatch-jit', layer, method: this.method,
+          kind: this.compilationKind, success: ret.toInt32() !== 0,
+          ordinal: this.ordinal};
+        if (this.ordinal <= SAMPLE_LIMIT) {
+          send(event);
+          log('JIT leave ' + JSON.stringify(event));
+        }
+      }
+    });
+    log('Attached compilation observer: ' + layer + ' via=' + site.source +
+      ' at=' + site.address + ' name=' + site.name);
+    send({type: 'artwatch-hook-attached', layer, source: site.source, address: site.address.toString()});
+    return true;
+  } catch (e) {
+    log('JIT hook failed for ' + layer + ': ' + (e.stack || e));
+    return false;
+  }
 }
 function main() {
-  const api = Number(sdkLevel());
-  log('pid='+Process.id+' arch='+Process.arch+' pointerSize='+Process.pointerSize+' api='+api);
-  const modules = Process.enumerateModules().filter(m => artNames.has(m.name));
-  if (modules.length === 0) { log('No ART library found'); return; }
-  for (const m of modules) {
-    log('module='+m.name+' base='+m.base+' path='+m.path);
-    // Dynamic exports only. Unlike enumerateSymbols(), this avoids scanning
-    // the full ELF symbol table on production ART.
+  const api = sdkLevel();
+  log('pid=' + Process.id + ' arch=' + Process.arch +
+      ' pointerSize=' + Process.pointerSize + ' api=' + api);
+  const modules = Process.enumerateModules().filter(m => artLibraries.has(m.name));
+  for (const module of modules) {
+    log('module=' + module.name + ' base=' + module.base + ' path=' + module.path);
     try {
-      const candidates = m.enumerateExports().filter(e =>
-        /jit_load|jit_compile_method|jit_compiler_|CompileMethod/.test(e.name));
-      log('exports=' + m.name + ' matches=' + candidates.length);
-      for (const e of candidates.slice(0, 30))
-        log('export=' + m.name + ' name=' + e.name + ' address=' + e.address);
-      if (candidates.length > 30) log('export-list-truncated=' + m.name);
-    } catch (e) { log('export-enumeration-error=' + m.name + ': ' + e.message); }
+      const matches = module.enumerateExports().filter(e =>
+        /jit_load|jit_compiler_|CompileMethod/.test(e.name));
+      log('exports=' + module.name + ' matches=' + matches.length);
+      matches.slice(0, 30).forEach(e =>
+        log('export=' + module.name + ' name=' + e.name + ' address=' + e.address));
+    } catch (e) { log('export-error=' + module.name + ': ' + e); }
   }
-
-  // Observe exported C++ compilation functions, using mangled ELF names.
-  const candidates = [];
-  for (const m of modules) {
-    for (const e of m.enumerateExports()) {
-      if (e.type !== 'function') continue;
-      let layer = null;
-      if (e.name.startsWith('_ZN3art3jit3Jit13CompileMethodE'))
-        layer = 'runtime';
-      else if (e.name.startsWith('_ZN3art3jit11JitCompiler13CompileMethodE'))
-        layer = 'compiler';
-      if (layer !== null) {
-        candidates.push({layer,address:e.address,name:e.name,module:m.name});
-        log('compilation-export=' + layer + ' name=' + e.name + ' at=' + e.address);
-      }
-    }
+  // Only claim argument decoding for the tested, architecture-specific ABI profiles.
+  if (Process.pointerSize !== 8 || !['x64', 'arm64'].includes(Process.arch) ||
+      ![33, 34].includes(api)) {
+    log('Inventory only: ABI profile not enabled'); return;
   }
-  if (!['x64','arm64'].includes(Process.arch) || ![33,34].includes(api)) {
-    log('Inventory only: compiler ABI not yet validated for this profile');
-    return;
-  }
-  const limits = {runtime:0,compiler:0};
+  const runtime = modules.find(m => m.name === 'libart.so' || m.name === 'libartd.so');
+  const compiler = modules.find(m => m.name === 'libart-compiler.so' ||
+                                     m.name === 'libartd-compiler.so');
   let hooked = 0;
-  for (const layer of ['runtime','compiler']) {
-    const site = candidates.find(c => c.layer === layer);
-    if (!site) continue;
-    try {
-      Interceptor.attach(site.address, {
-        onEnter(args) {
-          // Runtime: this, ArtMethod*, Thread*, CompilationKind, bool
-          // Compiler: this, Thread*, JitMemoryRegion*, ArtMethod*, CompilationKind
-          this.method = (layer === 'runtime' ? args[1] : args[3]).toString();
-          this.compilationKind = (layer === 'runtime' ? args[3] : args[4]).toInt32();
-        },
-        onLeave(ret) {
-          limits[layer]++;
-          const event = {type:'artwatch-jit',layer,method:this.method,
-            kind:this.compilationKind,success:ret.toInt32() !== 0};
-          send(event);
-          if (limits[layer] <= 25) log('JIT ' + JSON.stringify(event));
-        }
-      });
-      hooked++;
-      log('Attached compilation observer: ' + layer + ' at=' + site.address);
-      send({type:'artwatch-hook-attached',layer,name:site.name});
-    } catch (e) {
-      log('JIT hook failed for ' + layer + ': ' + e.stack);
+  if (runtime) {
+    const internal = getExport(runtime, '_ZN3art3jit3Jit21CompileMethodInternalE');
+    if (internal) {
+      hooked += Number(attach('runtime_internal',
+        {address: internal.address, name: internal.name, source: 'export'}));
+    } else {
+      log('runtime-internal-export=not-found');
     }
+  }
+  if (runtime && compiler) {
+    const exported = getExport(compiler, '_ZN3art3jit11JitCompiler13CompileMethodE');
+    const fromVtable = compilerViaVtable(runtime, compiler);
+    if (exported && fromVtable && !exported.address.equals(fromVtable.address))
+      log('compiler-export-vtable-address-mismatch export=' + exported.address +
+          ' vtable=' + fromVtable.address);
+    const site = exported
+      ? {address: exported.address, name: exported.name, source: 'export'}
+      : fromVtable;
+    if (site) hooked += Number(attach('compiler', site));
+    else log('compiler-boundary=not-found');
   }
   log('compile-hooks=' + hooked);
   log('No field interception or compiler IR mutation implemented');
-
 }
 main();
