@@ -28,6 +28,7 @@ jobs:
     env:
       FRIDA_VERSION: '17.27.1'
       ARTWATCH_LOG_DIR: /tmp/artwatch-logs
+      ARTWATCH_REQUIRE_JIT: '1'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
