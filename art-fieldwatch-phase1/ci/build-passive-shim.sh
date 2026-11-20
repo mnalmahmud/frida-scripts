@@ -18,7 +18,7 @@ mkdir -p "$out"
   art-fieldwatch-phase1/native/passive-shadow.c -ldl \
   -o "$out/libartwatch_shadow.so"
 file "$out/libartwatch_shadow.so"
-readelf -Ws "$out/libartwatch_shadow.so" | grep -E 'artwatch_shadow_(init|graph|node|report)' | tee "$out/exports.txt"
+readelf -Ws "$out/libartwatch_shadow.so" | grep -E 'artwatch_shadow_(init|graph|node|report|scope_begin|scope_end)' | tee "$out/exports.txt"
 
 # Package the shim as an app-owned native library. This is an ephemeral CI
 # build output, not a tracked ELF in the research branch.

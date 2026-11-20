@@ -87,6 +87,36 @@ EXPORT int artwatch_shadow_init(void) {
 }
 // Entry only while the exact matched HGraph* is alive. The first eight bytes
 // are opaque; never assume an HGraph layout or retain an object pointer.
+// Per-native-thread, fixed-capacity, observation-only visitor inventory.
+// Compiler workers are not asked to allocate or call back into Java.
+// This records only field nodes whose Accept() method is invoked while
+// RunOptimizations() is executing. It is NOT an HGraph block traversal.
+#define SHADOW_MAX_UNIQUE 512u
+struct scope {
+  const void *graph;
+  uint32_t get_visits, set_visits, unique_gets, unique_sets, overflow;
+  const void *nodes[SHADOW_MAX_UNIQUE];
+  uint8_t kinds[SHADOW_MAX_UNIQUE];
+};
+static __thread struct scope scoped;
+EXPORT int artwatch_shadow_scope_begin(const void *graph) {
+  if (ready != 1 || !aligned(graph) || scoped.graph != NULL) return 0;
+  memset(&scoped, 0, sizeof(scoped));
+  scoped.graph = graph;
+  return 1;
+}
+EXPORT int artwatch_shadow_scope_end(char *out, uint32_t length) {
+  if (ready != 1 || out == NULL || length < 128 || scoped.graph == NULL)
+    return 0;
+  int n = snprintf(out, length,
+    "{\"graph\":\"%p\",\"getVisits\":%u,\"setVisits\":%u,"
+    "\"uniqueGets\":%u,\"uniqueSets\":%u,\"overflow\":%u}",
+    scoped.graph, scoped.get_visits, scoped.set_visits,
+    scoped.unique_gets, scoped.unique_sets, scoped.overflow);
+  // Clear the observation window even if formatting somehow fails.
+  scoped.graph = NULL;
+  return n > 0 && (uint32_t)n < length ? 1 : 0;
+}
 EXPORT int artwatch_shadow_graph(const void *graph, const void *builder_graph) {
   if (ready != 1 || !aligned(graph) || graph != builder_graph) {
     __atomic_fetch_add(&rejected, 1u, __ATOMIC_RELAXED);
@@ -121,6 +151,28 @@ EXPORT int artwatch_shadow_node(const void *node, const void *vt_symbol, int kin
   }
   if (kind == 1) __atomic_fetch_add(&gets, 1u, __ATOMIC_RELAXED);
   else __atomic_fetch_add(&sets, 1u, __ATOMIC_RELAXED);
+  if (scoped.graph != NULL) {
+    if (kind == 1) scoped.get_visits++;
+    else scoped.set_visits++;
+    uint32_t used = scoped.unique_gets + scoped.unique_sets;
+    int seen = 0;
+    for (uint32_t i = 0; i < used; i++) {
+      if (scoped.nodes[i] == node && scoped.kinds[i] == (uint8_t)kind) {
+        seen = 1;
+        break;
+      }
+    }
+    if (!seen) {
+      if (used < SHADOW_MAX_UNIQUE) {
+        scoped.nodes[used] = node;
+        scoped.kinds[used] = (uint8_t)kind;
+        if (kind == 1) scoped.unique_gets++;
+        else scoped.unique_sets++;
+      } else {
+        scoped.overflow++;
+      }
+    }
+  }
   return 1;
 }
 // Writes only into the caller's scratch buffer, never to ART memory.

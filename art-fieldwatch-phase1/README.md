@@ -342,3 +342,24 @@ This is still a natural JIT test. No selective/global deoptimization,
 Stalker or compiler mutation is required. Crucially, the strict
 same-node LSE replacement/removal assertion is **unchanged**; failing
 to provoke elimination will remain visible as a CI failure.
+
+## P1.1 bounded optimization-window field-node inventory
+
+Native `artwatch_shadow_scope_begin/end` now maintains a **thread-local**
+fixed-size (512-node) inventory of vptr-verified `HInstanceFieldGet/Set`
+objects visited by ART **inside** a matched `RunOptimizations(HGraph*)`
+call. The native caller reports get/set visitor counts and distinct
+node identities per compilation; no pointers are retained after scope
+end and no ART object is modified. The inventory never calls Java,
+allocates ART memory or invokes a graph transformation. Overflow is
+reported and treated as a CI failure, rather than silently losing nodes.
+
+This is a compiler-visitor observation window, **not** direct traversal
+of `HGraph::GetBlocks()`. AOSP uses an `ArenaVector<HBasicBlock*>`
+for its block list, but constructing a compatible native reader from
+the NDK alone requires layout verification against the exact Android
+13 compiler build. We deliberately do not interpret private
+`HGraph` offsets or follow guessed pointers at this stage.
+
+Reference for structural IR types (not an ABI guarantee):
+https://android.googlesource.com/platform/art/+/refs/heads/android13-d4-s1-release/compiler/optimizing/nodes.h

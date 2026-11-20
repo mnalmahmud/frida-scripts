@@ -119,7 +119,9 @@ function loadPassiveShadow() {
     shadowShim = {
       graph: exported('artwatch_shadow_graph','int',['pointer','pointer']),
       node: exported('artwatch_shadow_node','int',['pointer','pointer','int']),
-      report: exported('artwatch_shadow_report','int',['pointer','uint'])
+      report: exported('artwatch_shadow_report','int',['pointer','uint']),
+      scopeBegin: exported('artwatch_shadow_scope_begin','int',['pointer']),
+      scopeEnd: exported('artwatch_shadow_scope_end','int',['pointer','uint'])
     };
     send({type:'artwatch-shadow-init',ready:true,source:'native',
       buildIdVerified:true,mutable:false});
@@ -314,14 +316,18 @@ function attachGraphBoundary(layer, site) {
           const previous = builtByThread.get(this.nativeThread);
           const matches = previous && previous.graphCandidate !== null
             ? previous.graphCandidate === this.graph : null;
+          this.shadowScopeStarted = false;
           if (shadowShim && matches === true) {
             try {
               const range = Process.findRangeByAddress(args[1]);
               if (range && range.protection.includes('r') &&
-                  shadowShim.graph(args[1], ptr(previous.graphCandidate)) === 1 &&
-                  shadowGraphLogged++ < 14) {
-                send({type:'artwatch-shadow-graph',method:this.method,
-                  graph:this.graph,matched:true});
+                  shadowShim.graph(args[1], ptr(previous.graphCandidate)) === 1) {
+                this.shadowScopeStarted = shadowShim.scopeBegin(args[1]) === 1;
+                if (!this.shadowScopeStarted)
+                  log('native-shadow-scope-start-rejected graph=' + this.graph);
+                if (shadowGraphLogged++ < 14)
+                  send({type:'artwatch-shadow-graph',method:this.method,
+                    graph:this.graph,matched:true});
               }
             } catch(e) { log('native-shadow-graph-error=' + e); }
           }
@@ -338,6 +344,22 @@ function attachGraphBoundary(layer, site) {
       },
       onLeave(_retval) {
         if (layer === 'pre_opt') {
+          if (this.shadowScopeStarted && shadowShim) {
+            try {
+              const buffer = Memory.alloc(512);
+              if (shadowShim.scopeEnd(buffer, 512) === 1) {
+                const result = JSON.parse(buffer.readUtf8String());
+                const event = {type:'artwatch-shadow-scope',
+                  method:this.method,compilationKind:this.kind,
+                  thread:this.nativeThread, ...result};
+                send(event);
+                if (this.ordinal <= SAMPLE_LIMIT)
+                  log('SHADOW_SCOPE ' + JSON.stringify(event));
+              } else {
+                log('native-shadow-scope-end-rejected method=' + this.method);
+              }
+            } catch(e) { log('native-shadow-scope-error=' + e); }
+          }
           if (this.previousOptimization === undefined) optimizationByThread.delete(this.nativeThread);
           else optimizationByThread.set(this.nativeThread, this.previousOptimization);
           return;

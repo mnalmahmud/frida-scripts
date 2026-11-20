@@ -289,6 +289,22 @@ def main():
                 raise AssertionError('Native shim missing expected counters')
             if stats[-1].get('rejected') != 0:
                 raise AssertionError('Native shim rejected a pointer/vtable')
+            scopes = [v for v in payloads
+                      if v.get('type') == 'artwatch-shadow-scope']
+            active_scopes = [v for v in scopes
+                             if v.get('getVisits',0) + v.get('setVisits',0) > 0]
+            total_unique = sum(v.get('uniqueGets',0) + v.get('uniqueSets',0)
+                               for v in scopes)
+            record('host',f'Native optimization scopes={len(scopes)} '
+                   f'with-field-visits={len(active_scopes)} '
+                   f'sum-unique-field-nodes={total_unique}')
+            if not scopes or not active_scopes or total_unique <= 0:
+                raise AssertionError('Native per-compilation observer saw no field nodes')
+            if any(v.get('overflow') != 0 for v in scopes):
+                raise AssertionError('Native fixed-capacity field inventory overflowed')
+            if any(v.get('uniqueGets',0) > v.get('getVisits',0) or
+                   v.get('uniqueSets',0) > v.get('setVisits',0) for v in scopes):
+                raise AssertionError('Native field inventory has inconsistent counts')
     record('host','PASS: Frida attach + ART discovery + fixture warmup')
 
 if __name__ == '__main__':
