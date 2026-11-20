@@ -11,6 +11,20 @@ const builtByThread = new Map();
 const activeGraphBuild = new Map();
 const FIELD_SAMPLE_LIMIT = 140;
 const fieldCounts = {instance: 0, static: 0};
+const activeFieldBuilder = new Map();
+const FIELD_NODE_SAMPLE_LIMIT = 180;
+let observedFieldNodeCandidates = 0;
+const knownFieldVtables = new Map();
+const FIELD_VTABLE_SYMBOLS = [
+  ['HInstanceFieldGet', '_ZTVN3art17HInstanceFieldGetE'],
+  ['HInstanceFieldSet', '_ZTVN3art17HInstanceFieldSetE'],
+  ['HStaticFieldGet', '_ZTVN3art15HStaticFieldGetE'],
+  ['HStaticFieldSet', '_ZTVN3art15HStaticFieldSetE'],
+  ['HUnresolvedInstanceFieldGet', '_ZTVN3art27HUnresolvedInstanceFieldGetE'],
+  ['HUnresolvedInstanceFieldSet', '_ZTVN3art27HUnresolvedInstanceFieldSetE'],
+  ['HUnresolvedStaticFieldGet', '_ZTVN3art25HUnresolvedStaticFieldGetE'],
+  ['HUnresolvedStaticFieldSet', '_ZTVN3art25HUnresolvedStaticFieldSetE']
+];
 function sdkLevel() {
   try {
     const p = Process.getModuleByName('libc.so').findExportByName('__system_property_get');
@@ -31,7 +45,9 @@ const NAMES = {
   // Candidate exported signatures from instruction_builder.cc. Only use if
   // this exact ELF symbol exists on the running device.
   fieldInstance: '_ZN3art19HInstructionBuilder24BuildInstanceFieldAccessERKNS_11InstructionEjb',
-  fieldStatic: '_ZN3art19HInstructionBuilder22BuildStaticFieldAccessERKNS_11InstructionEjb'
+  fieldStatic: '_ZN3art19HInstructionBuilder22BuildStaticFieldAccessERKNS_11InstructionEjb',
+  appendInstruction: '_ZN3art19HInstructionBuilder17AppendInstructionEPNS_12HInstructionE',
+  addInstruction: '_ZN3art11HBasicBlock14AddInstructionEPNS_12HInstructionE'
 };
 function getExport(module, exactName) {
   const address = module.findExportByName(exactName);
@@ -179,7 +195,9 @@ function attachFieldBuilder(access, site) {
         const active = compiling.get(thread);
         if (!active) return;
         const ordinal = ++fieldCounts[access];
-        if (ordinal > FIELD_SAMPLE_LIMIT) return;
+        this.fieldThread = thread;
+        this.previousFieldBuilder = activeFieldBuilder.get(thread);
+        this.hasFieldBuilder = true;
         const instruction = args[1];
         let opcode = null;
         let fieldIndexRaw = null;
@@ -196,8 +214,16 @@ function attachFieldBuilder(access, site) {
           graphCandidate: activeGraphBuild.get(thread) || null,
           dexPc: args[2].toUInt32(), isPut: args[3].toInt32() !== 0,
           opcode, fieldIndexRaw, ordinal};
-        send(event);
-        log('FIELD_BUILD ' + JSON.stringify(event));
+        activeFieldBuilder.set(thread, {...event, builder: args[0].toString()});
+        if (ordinal <= FIELD_SAMPLE_LIMIT) {
+          send(event);
+          log('FIELD_BUILD ' + JSON.stringify(event));
+        }
+      },
+      onLeave(_ret) {
+        if (!this.hasFieldBuilder) return;
+        if (this.previousFieldBuilder === undefined) activeFieldBuilder.delete(this.fieldThread);
+        else activeFieldBuilder.set(this.fieldThread, this.previousFieldBuilder);
       }
     });
     log('Attached field-builder observer: ' + access + ' at=' + site.address);
@@ -206,6 +232,61 @@ function attachFieldBuilder(access, site) {
     return true;
   } catch (e) {
     log('field-builder-hook-error=' + access + ': ' + (e.stack || e));
+    return false;
+  }
+}
+// Itanium C++ ABI: a complete-object vptr normally points 2 words past
+// its exported primary vtable symbol. This is a candidate ABI mapping,
+// validated by observed matches; not an assumed type ID or a layout parser.
+function discoverFieldVtables(compiler) {
+  for (const [kind, symbol] of FIELD_VTABLE_SYMBOLS) {
+    const site = getExport(compiler, symbol);
+    if (site === null) {
+      log('field-vtable-not-exported=' + kind);
+      continue;
+    }
+    const addressPoint = site.address.add(2 * Process.pointerSize).toString();
+    knownFieldVtables.set(addressPoint, kind);
+    log('field-vtable=' + kind + ' addressPoint=' + addressPoint);
+  }
+  send({type: 'artwatch-ir-vtables', available: Array.from(knownFieldVtables.values())});
+}
+// The HInstructionBuilder::AppendInstruction argument is a constructed
+// HInstruction*. HBasicBlock::AddInstruction is a version-specific fallback.
+// Capture it only within active field-building calls and never mutate it.
+function attachFieldNodeCandidate(site, source) {
+  try {
+    Interceptor.attach(site.address, {
+      onEnter(args) {
+        const thread = this.threadId;
+        const field = activeFieldBuilder.get(thread);
+        if (!field || (source === 'append' && args[0].toString() !== field.builder)) return;
+        const ordinal = ++observedFieldNodeCandidates;
+        if (ordinal > FIELD_NODE_SAMPLE_LIMIT) return;
+        const node = args[1].toString();
+        let vtable = null;
+        let kind = null;
+        try {
+          vtable = args[1].readPointer().toString();
+          kind = knownFieldVtables.get(vtable) || null;
+        } catch (e) {
+          log('field-node-vtable-read-failed=' + e);
+        }
+        const event = {type: 'artwatch-ir-node', source,
+          access: field.access, isPut: field.isPut, fieldIndexRaw: field.fieldIndexRaw,
+          dexPc: field.dexPc, opcode: field.opcode, graphCandidate: field.graphCandidate,
+          method: field.method, compilationKind: field.compilationKind,
+          thread, ordinal, node, vtable, kind};
+        send(event);
+        log('IR_NODE ' + JSON.stringify(event));
+      }
+    });
+    log('Attached field IR append observer via=' + source + ' at=' + site.address);
+    send({type: 'artwatch-hook-attached', layer: 'ir_append',
+      source, address: site.address.toString()});
+    return true;
+  } catch (e) {
+    log('field-node-hook-error=' + source + ': ' + (e.stack || e));
     return false;
   }
 }
@@ -221,7 +302,8 @@ function main() {
     for (const name of [NAMES.internal, NAMES.publicCompile,
                         NAMES.compiler, NAMES.instance, NAMES.buildGraph,
                         NAMES.runOptimizations, NAMES.fieldInstance,
-                        NAMES.fieldStatic, 'jit_load']) {
+                        NAMES.fieldStatic, NAMES.appendInstruction,
+                        NAMES.addInstruction, 'jit_load']) {
       try {
         const site = getExport(module, name);
         if (site) log('export=' + module.name + ' name=' + name +
@@ -276,6 +358,18 @@ function main() {
       const site = getExport(compiler, name);
       if (site) attachFieldBuilder(access, site);
       else log('field-builder-not-exported=' + access);
+    }
+    discoverFieldVtables(compiler);
+    // Prefer the builder's own out-of-line append; if absent use
+    // the HBasicBlock entry point. Both may be inlined on other builds.
+    const append = getExport(compiler, NAMES.appendInstruction);
+    const add = getExport(compiler, NAMES.addInstruction);
+    if (append && attachFieldNodeCandidate(append, 'append')) {
+      log('ir-append-mode=instruction-builder');
+    } else if (add && attachFieldNodeCandidate(add, 'basic-block')) {
+      log('ir-append-mode=basic-block');
+    } else {
+      log('ir-append-mode=not-exported-or-not-hookable');
     }
   } else {
     log('graph-boundaries=disabled (unverified binary profile)');

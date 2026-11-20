@@ -61,3 +61,24 @@ there is no actual run-time Java field event and no IR mutation.
 
 No field-builder hooks or event counts have been validated until this
 commit's emulator jobs complete.
+
+## API 33 read-only node identity experiment
+
+Source: [AOSP instruction_builder.cc](https://android.googlesource.com/platform/art/+/master/compiler/optimizing/instruction_builder.cc)
+shows `BuildInstanceFieldAccess` creating either a resolved
+`HInstanceFieldGet/Set` or an `HUnresolvedInstanceFieldGet/Set`, then
+calling `AppendInstruction`. The latter forwards the actual
+`HInstruction*` to `HBasicBlock::AddInstruction`.
+
+A new *optional* API 33 x86_64 probe looks for exact exported
+`HInstructionBuilder::AppendInstruction(HInstruction*)`, falling back
+to `HBasicBlock::AddInstruction(HInstruction*)`. During an active field
+build, it records the passed IR node pointer and its primary vtable
+address. If vtable export symbols exist, it compares their Itanium ABI
+address points to label the concrete class. No node fields are traversed,
+no graph is modified, and no raw pointer is retained past compilation.
+
+The CI test fails if the append hook attaches but does not execute
+within field-building context. Missing export symbols are reported as
+an explicit *research gap* rather than falsely asserting unsupported ART
+or crashing the process. This is not yet a runtime access event.

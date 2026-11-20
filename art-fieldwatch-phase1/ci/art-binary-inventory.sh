@@ -25,6 +25,10 @@ abi="$(adb shell getprop ro.product.cpu.abi | tr -d '\r')"
     readelf -Ws "$tmp/$library" 2>&1 |
       grep -E 'HGraphBuilder|OptimizingCompiler|TryCompile|RunOptimizations|PassObserver|JitCompiler.*CompileMethod|jit_load|CompileMethodInternal|BuildInstanceFieldAccess|BuildStaticFieldAccess|HInstanceField(Get|Set)|HStaticField(Get|Set)' |
       head -n 80 || true
+    echo "-- graph insertion and field node vtable candidates --"
+    readelf -Ws "$tmp/$library" 2>&1 |
+      grep -E '(HBasicBlock.*AddInstruction|HInstructionBuilder.*AppendInstruction|_ZTVN3art[0-9]+H(Unresolved)?(Instance|Static)Field(Get|Set)E)' |
+      head -n 100 || true
     echo "-- summary --"
     if readelf -SW "$tmp/$library" | grep -q ' \.symtab '; then
       echo 'full-symbol-table=present'
