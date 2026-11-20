@@ -6,7 +6,9 @@ sdk="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
 : "${sdk:?Set ANDROID_HOME or ANDROID_SDK_ROOT}"
 clang="$sdk/ndk/$version/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android33-clang"
 if [[ ! -x "$clang" ]]; then
-  yes | sdkmanager --install "ndk;$version" >/dev/null
+  # sdkmanager closes stdin when done; under pipefail, 'yes' then reports
+  # SIGPIPE even after a successful install. Check the installed compiler.
+  (yes | sdkmanager --install "ndk;$version" >/dev/null) || test -x "$clang"
 fi
 test -x "$clang"
 out="art-fieldwatch-phase1/native/out"
