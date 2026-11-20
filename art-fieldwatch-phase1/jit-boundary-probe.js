@@ -18,6 +18,21 @@ let observedFieldAccepts = 0;
 const insertionCounts = {append: 0, 'basic-block': 0};
 const optimizationByThread = new Map();
 const knownFieldVtables = new Map();
+const targetDexByMethod = new Map();
+const targetMethodPointers = new Set();
+const targetStates = new Map();
+const targetReportLimit = 36;
+const lseByThread = new Map();
+const mutationHookCounts = {replace: 0, remove: 0, lse: 0};
+function fieldKind(ptr) {
+  try { return knownFieldVtables.get(ptr.readPointer().toString()) || null; }
+  catch (_) { return null; }
+}
+function reportTargetEvent(state, event) {
+  if (state.reported++ >= targetReportLimit) return;
+  send(event);
+  log('TARGET_IR ' + JSON.stringify(event));
+}
 const FIELD_VTABLE_SYMBOLS = [
   ['HInstanceFieldGet', '_ZTVN3art17HInstanceFieldGetE'],
   ['HInstanceFieldSet', '_ZTVN3art17HInstanceFieldSetE'],
@@ -50,7 +65,13 @@ const NAMES = {
   fieldInstance: '_ZN3art19HInstructionBuilder24BuildInstanceFieldAccessERKNS_11InstructionEjb',
   fieldStatic: '_ZN3art19HInstructionBuilder22BuildStaticFieldAccessERKNS_11InstructionEjb',
   appendInstruction: '_ZN3art19HInstructionBuilder17AppendInstructionEPNS_12HInstructionE',
-  addInstruction: '_ZN3art11HBasicBlock14AddInstructionEPNS_12HInstructionE'
+  addInstruction: '_ZN3art11HBasicBlock14AddInstructionEPNS_12HInstructionE',
+  // ABI candidates; check exact runtime exports and archive matching ELF names.
+  // All are read-only observers, no replacement or mutation is performed.
+  replaceWith: '_ZN3art12HInstruction11ReplaceWithEPS0_',
+  removeInstruction: '_ZN3art11HBasicBlock17RemoveInstructionEPNS_12HInstructionEb',
+  lseRun: '_ZN3art20LoadStoreElimination3RunEv',
+  lseRunBool: '_ZN3art20LoadStoreElimination3RunEb'
 };
 function getExport(module, exactName) {
   const address = module.findExportByName(exactName);
@@ -96,6 +117,12 @@ function attach(layer, site) {
         if (layer === 'compiler') {
           this.nativeThread = this.threadId;
           this.previousCompilation = compiling.get(this.nativeThread);
+          this.previousTargetState = targetStates.get(this.nativeThread);
+          targetStates.set(this.nativeThread, {
+            method: this.method, kind: this.compilationKind,
+            seenVisits: new Set(), seenKinds: new Set(), uniqueNodes: new Set(),
+            visitsByPhase: {}, mutations: [], reported: 0
+          });
           compiling.set(this.nativeThread, {method: this.method, kind: this.compilationKind});
           builtByThread.delete(this.nativeThread);
         }
@@ -105,6 +132,23 @@ function attach(layer, site) {
       },
       onLeave(ret) {
         if (layer === 'compiler') {
+          const state = targetStates.get(this.nativeThread);
+          if (state && targetMethodPointers.has(this.method)) {
+            send({type: 'artwatch-target-summary',
+              method: this.method, compilationKind: this.compilationKind,
+              kinds: [...state.seenKinds].sort(),
+              uniqueNodeCount: state.uniqueNodes.size,
+              visitsByPhase: state.visitsByPhase,
+              mutations: state.mutations,
+              compilationSucceeded: ret.toInt32() !== 0
+            });
+            log('TARGET_SUMMARY method=' + this.method + ' kind=' +
+                this.compilationKind + ' nodes=' + state.uniqueNodes.size +
+                ' kinds=' + [...state.seenKinds].join(',') +
+                ' mutations=' + state.mutations.length);
+          }
+          if (this.previousTargetState) targetStates.set(this.nativeThread, this.previousTargetState);
+          else targetStates.delete(this.nativeThread);
           if (this.previousCompilation) compiling.set(this.nativeThread, this.previousCompilation);
           else compiling.delete(this.nativeThread);
           builtByThread.delete(this.nativeThread);
@@ -225,6 +269,22 @@ function attachFieldBuilder(access, site) {
           dexPc: args[2].toUInt32(), isPut: args[3].toInt32() !== 0,
           opcode, fieldIndexRaw, ordinal};
         activeFieldBuilder.set(thread, {...event, builder: args[0].toString()});
+        // FieldIRTarget.test(int): DEX 22c iput at PC 0 and iget at PC 2,
+        // both referencing field_idx 0 in the dedicated Java fixture.
+        if (access === 'instance' && fieldIndexRaw === 0 &&
+            ((opcode === 0x59 && event.dexPc === 0) ||
+             (opcode === 0x52 && event.dexPc === 2))) {
+          const evidence = targetDexByMethod.get(active.method) || 0;
+          const bits = evidence | (opcode === 0x59 ? 1 : 2);
+          targetDexByMethod.set(active.method, bits);
+          if (bits === 3 && !targetMethodPointers.has(active.method)) {
+            targetMethodPointers.add(active.method);
+            const identified = {type: 'artwatch-target-dex', method: active.method,
+              dexPattern: 'iput@0,iget@2,field_idx=0'};
+            send(identified);
+            log('TARGET_DEX ' + JSON.stringify(identified));
+          }
+        }
         if (ordinal <= FIELD_SAMPLE_LIMIT) {
           send(event);
           log('FIELD_BUILD ' + JSON.stringify(event));
@@ -326,19 +386,36 @@ function attachFieldAccept(compiler) {
           const compilation = compiling.get(thread);
           if (!compilation) return;
           const ordinal = ++observedFieldAccepts;
-          if (ordinal > FIELD_NODE_SAMPLE_LIMIT) return;
           const node = args[0].toString();
           const visitor = args[1].toString();
           let vtable = null;
           try { vtable = args[0].readPointer().toString(); }
           catch (e) { log('field-accept-vtable-read-failed=' + e); }
           const inferred = vtable ? knownFieldVtables.get(vtable) || null : null;
+          const phase = optimizationByThread.has(thread) ? 'optimizing' :
+            (activeGraphBuild.has(thread) ? 'building' : 'other');
+          if (targetMethodPointers.has(compilation.method)) {
+            const state = targetStates.get(thread);
+            if (state) {
+              state.seenKinds.add(kind);
+              state.uniqueNodes.add(kind + '@' + node);
+              const key = kind + '@' + node + '/' + phase;
+              if (!state.seenVisits.has(key)) {
+                state.seenVisits.add(key);
+                state.visitsByPhase[phase] = (state.visitsByPhase[phase] || 0) + 1;
+                reportTargetEvent(state, {type:'artwatch-target-ir',
+                  kind, node, phase, method: compilation.method,
+                  compilationKind: compilation.kind, thread,
+                  vtableMatches: inferred === kind});
+              }
+            }
+          }
+          if (ordinal > FIELD_NODE_SAMPLE_LIMIT) return;
           const event = {type: 'artwatch-ir-visit', source: 'accept',
             ordinal, kind, vtableKind: inferred, vtableMatches: inferred === kind,
             node, vtable, visitor, thread, method: compilation.method,
             compilationKind: compilation.kind,
-            phase: optimizationByThread.has(thread) ? 'optimizing' :
-              (activeGraphBuild.has(thread) ? 'building' : 'other')};
+            phase};
           send(event);
           log('IR_VISIT ' + JSON.stringify(event));
         }
@@ -350,6 +427,50 @@ function attachFieldAccept(compiler) {
     } catch (e) { log('field-accept-hook-error=' + kind + ': ' + e); }
   }
   log('field-accept-hooks=' + attached);
+}
+// Candidate mutation boundaries. Only inspect a field node's vptr on an
+// active JIT thread, and never call ReplaceWith/RemoveInstruction ourselves.
+function attachMutationObserver(site, op) {
+  try {
+    Interceptor.attach(site.address, {
+      onEnter(args) {
+        const thread = this.threadId;
+        const compilation = compiling.get(thread);
+        const state = targetStates.get(thread);
+        if (!compilation || !state || !targetMethodPointers.has(compilation.method)) return;
+        mutationHookCounts[op]++;
+        if (op === 'lse') {
+          this.lseThread = thread;
+          this.lsePrevious = lseByThread.get(thread);
+          lseByThread.set(thread, true);
+          reportTargetEvent(state, {type:'artwatch-target-lse-enter',
+            method:compilation.method, compilationKind:compilation.kind,
+            thread});
+          return;
+        }
+        const instruction = op === 'replace' ? args[0] : args[1];
+        const kind = fieldKind(instruction);
+        if (!kind) return;
+        const record = {op, kind, node: instruction.toString(),
+          substitute: op === 'replace' ? args[1].toString() : null,
+          duringLse: lseByThread.has(thread),
+          duringOptimizations: optimizationByThread.has(thread)};
+        state.mutations.push(record);
+        reportTargetEvent(state, {type:'artwatch-ir-mutation',
+          method:compilation.method, compilationKind:compilation.kind,
+          thread, ...record});
+      },
+      onLeave(_retval) {
+        if (op !== 'lse' || this.lseThread === undefined) return;
+        if (this.lsePrevious === undefined) lseByThread.delete(this.lseThread);
+        else lseByThread.set(this.lseThread, this.lsePrevious);
+      }
+    });
+    log('Attached mutation observer=' + op + ' at=' + site.address);
+    send({type:'artwatch-hook-attached',layer:'ir_mutation_' + op,
+      source:'export',address:site.address.toString()});
+    return true;
+  } catch (e) { log('mutation-observer-error=' + op + ': ' + e); return false; }
 }
 function main() {
   const api = sdkLevel();
@@ -364,7 +485,9 @@ function main() {
                         NAMES.compiler, NAMES.instance, NAMES.buildGraph,
                         NAMES.runOptimizations, NAMES.fieldInstance,
                         NAMES.fieldStatic, NAMES.appendInstruction,
-                        NAMES.addInstruction, 'jit_load']) {
+                        NAMES.addInstruction, NAMES.replaceWith,
+                        NAMES.removeInstruction, NAMES.lseRun,
+                        NAMES.lseRunBool, 'jit_load']) {
       try {
         const site = getExport(module, name);
         if (site) log('export=' + module.name + ' name=' + name +
@@ -429,6 +552,15 @@ function main() {
     const addHook = add ? attachFieldNodeCandidate(add, 'basic-block') : false;
     log('ir-insertion-hooks=' + JSON.stringify({append: appendHook, add: addHook}));
     attachFieldAccept(compiler);
+    for (const [op, names] of [
+      ['replace', [NAMES.replaceWith]],
+      ['remove', [NAMES.removeInstruction]],
+      ['lse', [NAMES.lseRun, NAMES.lseRunBool]]
+    ]) {
+      const site = names.map(n => getExport(compiler, n)).find(p => p !== null);
+      if (site) attachMutationObserver(site, op);
+      else log('mutation-boundary-not-exported=' + op);
+    }
   } else {
     log('graph-boundaries=disabled (unverified binary profile)');
   }

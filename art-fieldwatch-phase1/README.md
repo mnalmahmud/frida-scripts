@@ -100,3 +100,32 @@ It asserts that at least one field IR node is observed via either
 insertion or virtual visitor callbacks. Vtable matching distinguishes
 the actual node kind, but a visitor event alone does not establish that
 a particular DEX instruction survived a specific optimization pass.
+
+## Targeted field IR lifecycle (new experiment)
+
+The 2026-11-20 run 44709847484 passed on API 33 and API 34.
+API 33 observed 180 field IR `Accept` callbacks, all matching
+their exported class vtables. The two insertion symbols remained silent
+during active field-builder hooks, confirming that merely finding their
+exports was insufficient.
+
+A new probe identifies `FieldIRTarget.test(int)` through the verified
+DEX pattern `iput@0` and `iget@2` (field_idx 0) and independently
+records each unique field IR object/class/visitor phase for that method.
+It avoids losing the small fixture to the earlier 180-callback sample cap.
+
+AOSP load/store elimination can replace redundant field loads and remove
+unnecessary stores. This commit adds **read-only**, opt-in interception
+candidates for `HInstruction::ReplaceWith`,
+`HBasicBlock::RemoveInstruction`, and `LoadStoreElimination::Run`
+if those exact exports exist on the API 33 binary. Offline ELF symbol
+inventory records the actual signatures for follow-up corrections.
+
+The test strictly requires the target method and both get/set IR node
+types. It does *not* require an elimination event before one is observed,
+does not assume pass identity from an arbitrary visitor, and does not
+modify compiler memory or deoptimize any Java method.
+
+AOSP sources:
+- https://android.googlesource.com/platform/art/+/master/compiler/optimizing/load_store_elimination.cc
+- https://android.googlesource.com/platform/art/+/master/compiler/optimizing/nodes.cc

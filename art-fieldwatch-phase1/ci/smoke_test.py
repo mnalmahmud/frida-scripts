@@ -147,6 +147,28 @@ def main():
             raise AssertionError('No field IR nodes observed through insertion or Accept()')
         if visits and not matching_visits:
             raise AssertionError('Field Accept callback vtables did not match class identity')
+        targets = [v for v in payloads if v.get('type') == 'artwatch-target-dex']
+        target_ir = [v for v in payloads if v.get('type') == 'artwatch-target-ir']
+        summaries = [v for v in payloads
+                     if v.get('type') == 'artwatch-target-summary']
+        mutations = [v for v in payloads
+                     if v.get('type') == 'artwatch-ir-mutation']
+        mutation_hooks = sorted({v.get('layer') for v in payloads
+                                 if v.get('type') == 'artwatch-hook-attached'
+                                 and str(v.get('layer','')).startswith('ir_mutation_')})
+        target_kinds = sorted({v.get('kind') for v in target_ir})
+        record('host',f'target DEX identified={len(targets)} '
+               f'target IR={len(target_ir)} kinds={target_kinds} '
+               f'target summaries={len(summaries)} '
+               f'mutation hooks={mutation_hooks} mutation events={len(mutations)}')
+        if not targets:
+            raise AssertionError('FieldIRTarget.test DEX pattern not identified')
+        if not summaries:
+            raise AssertionError('No compiler summary for FieldIRTarget.test')
+        if not {'HInstanceFieldGet','HInstanceFieldSet'}.issubset(set(target_kinds)):
+            raise AssertionError('FieldIRTarget.test get/set IR nodes not both seen')
+        # Mutation/LSE hookability is a new hypothesis; missing exports are
+        # recorded, but do not invalidate the verified field-node capture.
     record('host','PASS: Frida attach + ART discovery + fixture warmup')
 
 if __name__ == '__main__':
