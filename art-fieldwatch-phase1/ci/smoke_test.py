@@ -49,6 +49,10 @@ def main():
     if 'module=libart' not in text: raise AssertionError('libart not discovered')
     if 'arch=' not in text: raise AssertionError('No Frida process header')
     if errors: raise AssertionError('Frida errors: '+'; '.join(errors))
+    variant = os.environ.get('ARTWATCH_BUILD_VARIANT','debug')
+    expected_debug = 'true' if variant == 'debug' else 'false'
+    if f'APP_DEBUGGABLE={expected_debug}' not in logs.stdout:
+        raise AssertionError(f'Unexpected app debuggable flag for {variant} build')
     if 'WARMUP_FAILED' in logs.stdout or 'WARMUP_DONE' not in logs.stdout:
         raise AssertionError('APK fixture warmup failed or timed out')
     hooked = [e['text'] for e in messages if e['kind']=='frida' and
@@ -169,6 +173,18 @@ def main():
             raise AssertionError('FieldIRTarget.test get/set IR nodes not both seen')
         # Mutation/LSE hookability is a new hypothesis; missing exports are
         # recorded, but do not invalidate the verified field-node capture.
+        phases = [v for v in payloads
+                  if v.get('type') == 'artwatch-phase-summary']
+        lse = [v for v in payloads if v.get('type') == 'artwatch-lse'
+               and v.get('phase') == 'enter']
+        optimized = [v for v in phases if v.get('compilationKind') == 2]
+        record('host',f'variant={variant} compilations={len(phases)} '
+               f'optimized={len(optimized)} lse-enter={len(lse)} '
+               f'target-phases={[v for v in phases if v.get("isFieldTarget")]}')
+        if variant == 'release' and not optimized:
+            raise AssertionError('Non-debuggable release fixture did not trigger optimized JIT')
+        if variant == 'release' and not lse:
+            raise AssertionError('No LSE::Run invocation observed in non-debuggable optimized JIT')
     record('host','PASS: Frida attach + ART discovery + fixture warmup')
 
 if __name__ == '__main__':

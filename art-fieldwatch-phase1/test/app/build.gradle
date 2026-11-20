@@ -11,4 +11,13 @@ android {
   versionCode 1
   versionName '0.1'
  }
+ buildTypes {
+  release {
+   // Keep the build non-debuggable while signing it for emulator installation.
+   // A root frida-server can instrument non-debuggable packages.
+   debuggable false
+   minifyEnabled false
+   signingConfig signingConfigs.debug
+  }
+ }
 }

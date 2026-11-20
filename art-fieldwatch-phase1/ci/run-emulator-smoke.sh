@@ -3,7 +3,14 @@ set -euo pipefail
 mkdir -p "${ARTWATCH_LOG_DIR:-/tmp/artwatch-logs}"
 adb root
 adb wait-for-device
-adb install -r art-fieldwatch-phase1/test/app/build/outputs/apk/debug/app-debug.apk
+variant="${ARTWATCH_BUILD_VARIANT:-debug}"
+case "$variant" in
+  debug|release) ;;
+  *) echo "Invalid APK variant: $variant" >&2; exit 1 ;;
+esac
+apk="art-fieldwatch-phase1/test/app/build/outputs/apk/$variant/app-$variant.apk"
+test -f "$apk" || { echo "APK not found: $apk" >&2; exit 1; }
+adb install -r "$apk"
 FRIDA_VERSION="${FRIDA_VERSION:-17.27.1}"
 ABI="$(adb shell getprop ro.product.cpu.abi | tr -d '\r')"
 case "$ABI" in

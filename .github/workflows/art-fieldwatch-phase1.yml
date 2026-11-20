@@ -24,9 +24,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        api: [33, 34]
+        include:
+          - api: 33
+            variant: debug
+          - api: 33
+            variant: release
+          - api: 34
+            variant: debug
     env:
       FRIDA_VERSION: '17.27.1'
+      ARTWATCH_BUILD_VARIANT: ${{ matrix.variant }}
       ARTWATCH_LOG_DIR: /tmp/artwatch-logs
       ARTWATCH_REQUIRE_JIT: '1'
     steps:
@@ -64,7 +71,15 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.10.2'
-      - run: gradle -p art-fieldwatch-phase1/test :app:assembleDebug --no-daemon
+      - name: Build selected APK variant
+        shell: bash
+        run: |
+          case "$ARTWATCH_BUILD_VARIANT" in
+            debug) task=assembleDebug ;;
+            release) task=assembleRelease ;;
+            *) exit 1 ;;
+          esac
+          gradle -p art-fieldwatch-phase1/test ":app:$task" --no-daemon
       - run: python3 -m pip install 'frida==17.27.1'
       - uses: reactivecircus/android-emulator-runner@v2
         with:
@@ -78,7 +93,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: artwatch-api${{ matrix.api }}-x86_64
+          name: artwatch-api${{ matrix.api }}-x86_64-${{ matrix.variant }}
           path: /tmp/artwatch-logs/
           if-no-files-found: ignore
   android-arm64:

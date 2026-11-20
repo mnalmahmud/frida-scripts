@@ -129,3 +129,33 @@ modify compiler memory or deoptimize any Java method.
 AOSP sources:
 - https://android.googlesource.com/platform/art/+/master/compiler/optimizing/load_store_elimination.cc
 - https://android.googlesource.com/platform/art/+/master/compiler/optimizing/nodes.cc
+
+## Test non-debuggable release JIT/LSE — November 2026
+
+Run 44711997095 passed on both API 33 and 34. In the API 33
+debug APK, the exact `HInstanceFieldSet` and `HInstanceFieldGet` objects
+were observed during the target method's baseline JIT build. Three
+mutation/LSE symbol hooks were installed but reported zero target mutations.
+Do not interpret this as a negative ART result: AOSP
+`LoadStoreElimination::Run` explicitly returns early if
+`graph_->IsDebuggable()`, and our APK was previously *only* built
+as `assembleDebug`.
+
+The API 33 CI matrix now includes a separately signed,
+**non-debuggable** `assembleRelease` APK. Rooted frida-server attaches
+normally. The app logs its actual ApplicationInfo debuggable flag,
+and the Python harness asserts this flag matches the tested variant.
+The non-debuggable fixture performs additional hot calls to target
+optimized compilation without touching ART's deoptimization APIs.
+
+Read-only `LoadStoreElimination::Run(bool)` hooks now report every
+JIT invocation (bounded output), with the compilation kind and whether
+the invocation belongs to the target method, plus the Boolean result
+of the pass. Per-method compilation summaries include whether
+`RunOptimizations()` ran and how often LSE was entered.
+
+The release job explicitly requires an optimized JIT compilation and
+at least one LSE invocation. If either is missing, it fails with
+a diagnostic instead of silently reporting an invalid optimization test.
+
+Source: https://android.googlesource.com/platform/art/+/master/compiler/optimizing/load_store_elimination.cc

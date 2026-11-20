@@ -24,6 +24,8 @@ const targetStates = new Map();
 const targetReportLimit = 36;
 const lseByThread = new Map();
 const mutationHookCounts = {replace: 0, remove: 0, lse: 0};
+let lseTraceEmitted = 0;
+const LSE_TRACE_LIMIT = 80;
 function fieldKind(ptr) {
   try { return knownFieldVtables.get(ptr.readPointer().toString()) || null; }
   catch (_) { return null; }
@@ -121,7 +123,8 @@ function attach(layer, site) {
           targetStates.set(this.nativeThread, {
             method: this.method, kind: this.compilationKind,
             seenVisits: new Set(), seenKinds: new Set(), uniqueNodes: new Set(),
-            visitsByPhase: {}, mutations: [], reported: 0
+            visitsByPhase: {}, mutations: [], reported: 0,
+            optimizationEntries: 0, lseInvocations: 0
           });
           compiling.set(this.nativeThread, {method: this.method, kind: this.compilationKind});
           builtByThread.delete(this.nativeThread);
@@ -146,6 +149,14 @@ function attach(layer, site) {
                 this.compilationKind + ' nodes=' + state.uniqueNodes.size +
                 ' kinds=' + [...state.seenKinds].join(',') +
                 ' mutations=' + state.mutations.length);
+          }
+          if (state && this.ordinal <= SAMPLE_LIMIT) {
+            send({type: 'artwatch-phase-summary', method: this.method,
+              compilationKind: this.compilationKind,
+              isFieldTarget: targetMethodPointers.has(this.method),
+              optimizationEntries: state.optimizationEntries,
+              lseInvocations: state.lseInvocations,
+              success: ret.toInt32() !== 0});
           }
           if (this.previousTargetState) targetStates.set(this.nativeThread, this.previousTargetState);
           else targetStates.delete(this.nativeThread);
@@ -194,6 +205,8 @@ function attachGraphBoundary(layer, site) {
           // const OptimizingCompiler* this, HGraph*, CodeGenerator*, ...
           this.previousOptimization = optimizationByThread.get(this.nativeThread);
           optimizationByThread.set(this.nativeThread, args[1].toString());
+          const state = targetStates.get(this.nativeThread);
+          if (state) state.optimizationEntries++;
           this.graph = args[1].toString();
           const previous = builtByThread.get(this.nativeThread);
           const matches = previous && previous.graphCandidate !== null
@@ -437,17 +450,30 @@ function attachMutationObserver(site, op) {
         const thread = this.threadId;
         const compilation = compiling.get(thread);
         const state = targetStates.get(thread);
-        if (!compilation || !state || !targetMethodPointers.has(compilation.method)) return;
+        if (!compilation || !state) return;
         mutationHookCounts[op]++;
         if (op === 'lse') {
           this.lseThread = thread;
           this.lsePrevious = lseByThread.get(thread);
           lseByThread.set(thread, true);
-          reportTargetEvent(state, {type:'artwatch-target-lse-enter',
-            method:compilation.method, compilationKind:compilation.kind,
-            thread});
+          state.lseInvocations++;
+          this.lseReport = lseTraceEmitted++ < LSE_TRACE_LIMIT;
+          if (this.lseReport) {
+            const event = {type:'artwatch-lse', phase:'enter',
+              method:compilation.method, compilationKind:compilation.kind,
+              thread, isFieldTarget:targetMethodPointers.has(compilation.method),
+              partialMode: args[1].toInt32() !== 0};
+            send(event);
+            log('LSE ' + JSON.stringify(event));
+          }
+          if (targetMethodPointers.has(compilation.method)) {
+            reportTargetEvent(state, {type:'artwatch-target-lse-enter',
+              method:compilation.method, compilationKind:compilation.kind,
+              thread});
+          }
           return;
         }
+        if (!targetMethodPointers.has(compilation.method)) return;
         const instruction = op === 'replace' ? args[0] : args[1];
         const kind = fieldKind(instruction);
         if (!kind) return;
@@ -460,8 +486,14 @@ function attachMutationObserver(site, op) {
           method:compilation.method, compilationKind:compilation.kind,
           thread, ...record});
       },
-      onLeave(_retval) {
+      onLeave(retval) {
         if (op !== 'lse' || this.lseThread === undefined) return;
+        if (this.lseReport) {
+          const event = {type:'artwatch-lse', phase:'exit',
+            thread:this.lseThread, result:retval.and(0xff).toInt32() !== 0};
+          send(event);
+          log('LSE ' + JSON.stringify(event));
+        }
         if (this.lsePrevious === undefined) lseByThread.delete(this.lseThread);
         else lseByThread.set(this.lseThread, this.lsePrevious);
       }
