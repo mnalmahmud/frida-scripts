@@ -319,3 +319,26 @@ the *already loaded* ELF lazily when the first compiler callback
 occurs. No `dlopen` attempt from `/data/local/tmp`, global SELinux
 policy change or writable executable file mapping is used.
 API34 retains the previous monitoring behavior.
+
+## More reliable release JIT/LSE fixture coverage
+
+Run 44734968302 confirmed the API33 native shim works, with correct
+ART build IDs, six graph validations, and native get/set vtable counts,
+but the release compiler did not eliminate the targeted get during
+that particular warmup (no field-node mutation event). The debug and
+API34 jobs passed. This does not invalidate prior exact-node
+elimination evidence; it reveals JIT-scheduling/coverage variability.
+
+Release warmup now exercises three **different** naturally hot methods
+across five bounded stages, with short sleeps so the optimizing JIT
+worker has time to drain its queue: `warmup`, `exerciseOverwrites`
+and `exerciseAlternating`. The latter two have read-after-write
+operations behind an `identity()` helper, and the release DEX audit
+asserts `iput` **and** `iget` survived D8 in each method.
+The Frida observation window is extended from 20 to 30 seconds only
+for release; it must see all five logcat stage markers.
+
+This is still a natural JIT test. No selective/global deoptimization,
+Stalker or compiler mutation is required. Crucially, the strict
+same-node LSE replacement/removal assertion is **unchanged**; failing
+to provoke elimination will remain visible as a CI failure.

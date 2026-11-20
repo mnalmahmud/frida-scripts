@@ -42,7 +42,9 @@ def main():
         script.set_log_handler(lambda level, line: record('console-'+level, line))
         script.load()
         device.resume(pid)
-        time.sleep(20)
+        # Staged release warmup gives natural JIT workers time to compile
+        # all three independently hot field-read/write workloads.
+        time.sleep(30 if os.environ.get('ARTWATCH_BUILD_VARIANT') == 'release' else 20)
     finally:
         try: session.detach()
         except frida.InvalidOperationError: pass
@@ -63,6 +65,12 @@ def main():
             raise AssertionError('App failed to load packaged native shadow library')
     if 'WARMUP_FAILED' in logs.stdout or 'WARMUP_DONE' not in logs.stdout:
         raise AssertionError('APK fixture warmup failed or timed out')
+    if variant == 'release':
+        markers = [f'LSE_STAGE_DONE={i}' for i in range(5)]
+        missing_stages = [marker for marker in markers if marker not in logs.stdout]
+        if missing_stages:
+            raise AssertionError(f'Incomplete staged LSE warmup: {missing_stages}')
+        record('host','Five staged release warmups completed before JIT assertions')
     hooked = [e['text'] for e in messages if e['kind']=='frida' and
               '"artwatch-hook-attached"' in e['text']]
     compiled = [e['text'] for e in messages if e['kind']=='frida' and

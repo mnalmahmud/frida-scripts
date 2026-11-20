@@ -36,6 +36,22 @@ if "$analyzer" dex code --class com.example.artfieldwatch.FieldIRTarget "$apk" >
       exit 1
     fi
     echo "Verified release testViaIdentity DEX retains both iput and iget."
+    # Separate loop fixtures should also preserve actual field reads in DEX.
+    # Otherwise JIT cannot be credited with eliminating them.
+    for method in exerciseOverwrites exerciseAlternating; do
+      awk -v method="$method" '
+        $0 ~ "^\\.method.* " method "\\(I\\)I" { inside=1; next }
+        inside && /^\\.end method/ { exit }
+        inside { print }
+      ' "$out/fieldir-$variant.smali" > "$out/fieldir-release-$method.smali"
+      if ! grep -q 'iput' "$out/fieldir-release-$method.smali" ||
+         ! grep -q 'iget' "$out/fieldir-release-$method.smali"; then
+        echo "::error::Release DEX missing field iput/iget in $method"
+        cat "$out/fieldir-release-$method.smali"
+        exit 1
+      fi
+      echo "Verified release DEX $method retains both iput and iget."
+    done
   fi
 else
   echo "apkanalyzer failed; preserving stderr as diagnostic"

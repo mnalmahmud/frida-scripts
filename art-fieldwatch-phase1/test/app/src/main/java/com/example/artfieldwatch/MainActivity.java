@@ -33,7 +33,18 @@ public final class MainActivity extends Activity {
     accumulator += FieldIRTarget.warmup(150000);
     // Give the non-debuggable app enough hot calls for optimized compilation.
     // No deoptimization or reflective compiler calls are used.
-    if (!appDebuggable) accumulator += FieldIRTarget.warmup(1200000);
+    if (!appDebuggable) {
+     // Distinct methods generate multiple natural JIT compilation
+     // opportunities. Brief pauses allow the worker to drain its queue.
+     // No deoptimization or hidden ART APIs are invoked.
+     for (int stage = 0; stage < 5; stage++) {
+      accumulator += FieldIRTarget.warmup(300000);
+      accumulator += FieldIRTarget.exerciseOverwrites(300000);
+      accumulator += FieldIRTarget.exerciseAlternating(300000);
+      Log.i("ARTWATCH_CI", "LSE_STAGE_DONE=" + stage);
+      Thread.sleep(400);
+     }
+    }
     Log.i("ARTWATCH_CI","WARMUP_DONE checksum=" + accumulator);
    } catch (Throwable t) {
     Log.e("ARTWATCH_CI","WARMUP_FAILED",t);

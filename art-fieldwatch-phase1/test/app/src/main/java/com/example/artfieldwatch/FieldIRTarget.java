@@ -20,6 +20,45 @@ public final class FieldIRTarget {
     return identity(this).value;
   }
 
+  // Keep these alternate JIT compilation sites structurally distinct.
+  // The helper makes the value read visible in release DEX while ART
+  // can inline the helper and eliminate redundant field operations.
+  public static int exerciseOverwrites(int iterations) {
+    FieldIRTarget target = new FieldIRTarget();
+    int checksum = 0;
+    for (int i = 0; i < iterations; i++) {
+      target.value = i;
+      target.value = i + 1;
+      int observed = identity(target).value;
+      if (observed != i + 1) {
+        throw new AssertionError("Overwrite read mismatch at " + i);
+      }
+      checksum += observed & 1;
+    }
+    return checksum;
+  }
+
+  public static int exerciseAlternating(int iterations) {
+    FieldIRTarget target = new FieldIRTarget();
+    int checksum = 0;
+    for (int i = 0; i < iterations; i++) {
+      int expected;
+      if ((i & 1) == 0) {
+        target.value = i;
+        expected = i;
+      } else {
+        target.value = i + 1;
+        expected = i + 1;
+      }
+      int observed = identity(target).value;
+      if (observed != expected) {
+        throw new AssertionError("Alternating read mismatch at " + i);
+      }
+      checksum += observed & 1;
+    }
+    return checksum;
+  }
+
   public static int warmup(int iterations) {
     FieldIRTarget target = new FieldIRTarget();
     int observed = 0;
