@@ -18,6 +18,9 @@ let observedFieldAccepts = 0;
 const insertionCounts = {append: 0, 'basic-block': 0};
 const optimizationByThread = new Map();
 const knownFieldVtables = new Map();
+let shadowShim = null;
+let shadowGraphLogged = 0;
+let shadowNodeLogged = 0;
 const targetDexByMethod = new Map();
 let backendVisitOrdinal = 0;
 const BACKEND_VISIT_LIMIT = 160;
@@ -89,6 +92,44 @@ const NAMES = {
 function getExport(module, exactName) {
   const address = module.findExportByName(exactName);
   return address === null ? null : {name: exactName, address};
+}
+// Passive P1: only the CI script can opt in to loading the exact shim.
+// It contains no ART write API; invalid build IDs fail closed.
+function loadPassiveShadow() {
+  if (typeof globalThis.__artwatchShadowPath !== 'string' ||
+      Process.arch !== 'x64') return;
+  try {
+    const module = Module.load(globalThis.__artwatchShadowPath);
+    function exported(name, ret, args) {
+      const address = module.findExportByName(name);
+      if (address === null) throw new Error('missing native shadow export=' + name);
+      return new NativeFunction(address, ret, args);
+    }
+    if (exported('artwatch_shadow_init','int',[])() !== 1) {
+      send({type:'artwatch-shadow-init', ready:false,
+        reason:'SDK or mapped ART ELF build-ID verification failed'});
+      return;
+    }
+    shadowShim = {
+      graph: exported('artwatch_shadow_graph','int',['pointer','pointer']),
+      node: exported('artwatch_shadow_node','int',['pointer','pointer','int']),
+      report: exported('artwatch_shadow_report','int',['pointer','uint'])
+    };
+    send({type:'artwatch-shadow-init',ready:true,source:'native',
+      buildIdVerified:true,mutable:false});
+    log('native-shadow=ready with verified ART build IDs');
+  } catch(e) {
+    log('native-shadow-load-error=' + (e.stack || e));
+    send({type:'artwatch-shadow-init',ready:false,reason:String(e)});
+  }
+}
+function reportPassiveShadow() {
+  if (!shadowShim) return;
+  try {
+    const buf = Memory.alloc(384);
+    if (shadowShim.report(buf, 384) !== 1) return;
+    send({type:'artwatch-shadow-stats',...JSON.parse(buf.readUtf8String())});
+  } catch(e) { log('native-shadow-report-error=' + e); }
 }
 function compilerViaVtable(runtime, compiler) {
   // This is an ABI-specific experiment, NOT a generic C++ vtable scanner.
@@ -212,6 +253,7 @@ function attach(layer, site) {
               lseInvocations: state.lseInvocations,
               success: ret.toInt32() !== 0});
           }
+          if (shadowShim && this.ordinal <= SAMPLE_LIMIT) reportPassiveShadow();
           if (this.previousTargetState) targetStates.set(this.nativeThread, this.previousTargetState);
           else targetStates.delete(this.nativeThread);
           if (this.previousCompilation) compiling.set(this.nativeThread, this.previousCompilation);
@@ -265,6 +307,17 @@ function attachGraphBoundary(layer, site) {
           const previous = builtByThread.get(this.nativeThread);
           const matches = previous && previous.graphCandidate !== null
             ? previous.graphCandidate === this.graph : null;
+          if (shadowShim && matches === true) {
+            try {
+              const range = Process.findRangeByAddress(args[1]);
+              if (range && range.protection.includes('r') &&
+                  shadowShim.graph(args[1], ptr(previous.graphCandidate)) === 1 &&
+                  shadowGraphLogged++ < 14) {
+                send({type:'artwatch-shadow-graph',method:this.method,
+                  graph:this.graph,matched:true});
+              }
+            } catch(e) { log('native-shadow-graph-error=' + e); }
+          }
           const event = {type: 'artwatch-graph', phase: 'pre-opt',
             ordinal: this.ordinal, thread: this.nativeThread,
             method: this.method, kind: this.kind, graph: this.graph,
@@ -470,6 +523,18 @@ function attachFieldAccept(compiler) {
           try { vtable = args[0].readPointer().toString(); }
           catch (e) { log('field-accept-vtable-read-failed=' + e); }
           const inferred = vtable ? knownFieldVtables.get(vtable) || null : null;
+          if (shadowShim && inferred === kind &&
+              (kind === 'HInstanceFieldGet' || kind === 'HInstanceFieldSet')) {
+            try {
+              const vt = getExport(compiler, symbol);
+              if (vt && shadowShim.node(args[0], vt.address,
+                  kind === 'HInstanceFieldGet' ? 1 : 2) === 1 &&
+                  shadowNodeLogged++ < 16) {
+                send({type:'artwatch-shadow-node',kind,node,thread,
+                  method:compilation.method,compilationKind:compilation.kind});
+              }
+            } catch(e) { log('native-shadow-node-error=' + e); }
+          }
           const phase = optimizationByThread.has(thread) ? 'optimizing' :
             (activeGraphBuild.has(thread) ? 'building' : 'other');
           if (targetMethodPointers.has(compilation.method)) {
@@ -711,6 +776,7 @@ function main() {
       else log('field-builder-not-exported=' + access);
     }
     discoverFieldVtables(compiler);
+    loadPassiveShadow();
     // Do not assume the builder's exported AppendInstruction is called.
     // Both out-of-line functions can coexist with inlined call sites.
     const append = getExport(compiler, NAMES.appendInstruction);

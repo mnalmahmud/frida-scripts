@@ -32,7 +32,12 @@ def main():
     record('host','spawned-pid='+str(pid))
     session = device.attach(pid)
     try:
-        script = session.create_script((BASE/'jit-boundary-probe.js').read_text())
+        source = (BASE/'jit-boundary-probe.js').read_text()
+        if os.environ.get('ARTWATCH_SHADOW_SHIM') == '1':
+            source = ('globalThis.__artwatchShadowPath = ' +
+                      json.dumps('/data/local/tmp/libartwatch_shadow.so') +
+                      ';\n' + source)
+        script = session.create_script(source)
         script.on('message',on_message)
         script.set_log_handler(lambda level, line: record('console-'+level, line))
         script.load()
@@ -78,6 +83,7 @@ def main():
             raise AssertionError('Internal runtime hook installed but did not execute')
     if required and 'api=33' in text and 'arch=x64' in text:
         # This binary exports both boundaries; require actual callbacks.
+        shadow_enabled = os.environ.get('ARTWATCH_SHADOW_SHIM') == '1'
         payloads = []
         for e in messages:
             if e['kind'] != 'frida':
@@ -248,6 +254,30 @@ def main():
                                  'removed during LSE without backend emission')
         if variant == 'release' and not baseline_reads:
             raise AssertionError('No baseline JIT get node observed at code emission')
+        if shadow_enabled:
+            inits = [v for v in payloads if v.get('type') == 'artwatch-shadow-init']
+            if not any(v.get('ready') is True and v.get('buildIdVerified') is True
+                       for v in inits):
+                raise AssertionError(f'Native passive shadow shim rejected: {inits}')
+            graphs = [v for v in payloads
+                      if v.get('type') == 'artwatch-shadow-graph']
+            nodes = [v for v in payloads
+                     if v.get('type') == 'artwatch-shadow-node']
+            stats = [v for v in payloads
+                     if v.get('type') == 'artwatch-shadow-stats'
+                     and v.get('ready') is True]
+            kinds = {v.get('kind') for v in nodes}
+            record('host',f'Native shadow graphs={len(graphs)} '
+                   f'nodes={len(nodes)} kinds={sorted(kinds)} '
+                   f'latest-stats={stats[-1] if stats else None}')
+            if not graphs or not {'HInstanceFieldGet',
+                                   'HInstanceFieldSet'}.issubset(kinds):
+                raise AssertionError('Native shim did not validate graph/get/set')
+            if not stats or not all(stats[-1].get(k,0)>0
+                                    for k in ('graphs','gets','sets')):
+                raise AssertionError('Native shim missing expected counters')
+            if stats[-1].get('rejected') != 0:
+                raise AssertionError('Native shim rejected a pointer/vtable')
     record('host','PASS: Frida attach + ART discovery + fixture warmup')
 
 if __name__ == '__main__':

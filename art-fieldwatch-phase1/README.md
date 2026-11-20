@@ -279,3 +279,23 @@ events** separately from **physical compiled memory accesses**.
 A future compiler-side event sink would require side-effect ordering,
 exception/GC-safety analysis, field-target resolution and live-value
 mapping. No such sink or IR mutation is implemented yet.
+
+## Opt-in API33 P1 native shadow companion
+
+`native/passive-shadow.c` is a read-only NDK shared library for the
+**exact** API 33 x86_64 emulator ART ELF build IDs. It checks live
+`libart.so` and `libart-compiler.so` GNU build IDs and SDK before
+enabling observation. It reads one opaque word from a matched live
+`HGraph*`, and checks `HInstanceFieldGet/Set` vptrs against exported
+primary C++ vtable address points while the compiler visitor executes.
+No ART memory writes or C++ class layout guesses are present.
+
+Only API33 CI opts in via `ARTWATCH_SHADOW_SHIM=1`. An NDK build alone
+is not considered evidence: CI requires the native module to load,
+verify both mapped build IDs, observe a graph, recognize both instance
+field node kinds, and reject zero pointers. API34 remains unchanged.
+
+P1 does **not** traverse HGraph blocks or construct an IR node. The
+test covers native-bridge callability and object validation, which
+are prerequisites for source-matched native traversal in the next
+phase. No field runtime monitoring has been implemented.

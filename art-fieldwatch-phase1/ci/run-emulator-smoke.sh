@@ -36,6 +36,15 @@ if [ "$ready" -ne 1 ]; then
   adb shell cat /data/local/tmp/artwatch-frida-server.log || true
   exit 1
 fi
+if [[ "${ARTWATCH_SHADOW_SHIM:-0}" == 1 ]]; then
+  if [[ "$ABI" != x86_64 ]]; then
+    echo "Native shadow shim supports only x86_64" >&2; exit 1
+  fi
+  native="art-fieldwatch-phase1/native/out/libartwatch_shadow.so"
+  test -s "$native" || { echo "Missing native shim: $native" >&2; exit 1; }
+  adb push "$native" /data/local/tmp/libartwatch_shadow.so
+  adb shell chmod 755 /data/local/tmp/libartwatch_shadow.so
+fi
 # Pull ART ELF files for offline symbol inspection; never scan their full
 # symbol tables inside the injected application.
 bash art-fieldwatch-phase1/ci/art-binary-inventory.sh || true

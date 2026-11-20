@@ -19,6 +19,7 @@ jobs:
       - run: python3 -m py_compile art-fieldwatch-phase1/ci/smoke_test.py
       - run: bash -n art-fieldwatch-phase1/ci/run-emulator-smoke.sh
       - run: bash -n art-fieldwatch-phase1/ci/dex-inventory.sh
+      - run: bash -n art-fieldwatch-phase1/ci/build-passive-shim.sh
   android:
     runs-on: ubuntu-latest
     timeout-minutes: 35
@@ -37,6 +38,7 @@ jobs:
       ARTWATCH_BUILD_VARIANT: ${{ matrix.variant }}
       ARTWATCH_LOG_DIR: /tmp/artwatch-logs
       ARTWATCH_REQUIRE_JIT: '1'
+      ARTWATCH_SHADOW_SHIM: ${{ matrix.api == 33 && '1' || '0' }}
     steps:
       - uses: actions/checkout@v4
       # Emulator 37.3+ refuses -accel off without an explicit TCG override.
@@ -72,6 +74,9 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.10.2'
+      - name: Build API33 passive shadow shim
+        if: matrix.api == 33
+        run: bash art-fieldwatch-phase1/ci/build-passive-shim.sh
       - name: Build selected APK variant
         shell: bash
         run: |
