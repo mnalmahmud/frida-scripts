@@ -323,7 +323,33 @@ def main():
                 raise AssertionError('Invalid graph block discovery counts')
             if unique_blocks and stats[-1].get('blocks',0) < unique_blocks:
                 raise AssertionError('Native block confirmations smaller than unique discoveries')
-            # Out-of-line graph functions may be absent or silent after inlining.
+            if 'graph_add_block' not in {v.get('layer') for v in block_hooks}:
+                raise AssertionError('Previously verified HGraph::AddBlock export disappeared')
+            if not constructed or unique_blocks <= 0:
+                raise AssertionError('No block identities observed at graph construction')
+            instruction_evidence = [v for v in payloads
+                                    if v.get('type') ==
+                                       'artwatch-block-instruction-evidence']
+            visitor_evidence = [v for v in payloads
+                                if v.get('type') == 'artwatch-block-visitor']
+            insert_calls = sum(v.get('addInstructionCalls',0)
+                               for v in instruction_evidence)
+            inserted_fields = sum(v.get('fieldNodeInserts',0)
+                                  for v in instruction_evidence)
+            visited_blocks = sum(v.get('uniqueBlocks',0)
+                                 for v in visitor_evidence)
+            record('host',f'Block/instruction bridge calls={insert_calls} '
+                   f'typed-field-inserts={inserted_fields} '
+                   f'visitor-scopes={len(visitor_evidence)} '
+                   f'visitor-blocks={visited_blocks}')
+            if any(v.get('mappedFieldNodes',0) > v.get('fieldNodeInserts',0)
+                   for v in instruction_evidence):
+                raise AssertionError('Impossible block-to-field mapping counts')
+            if any(v.get('newlySeenBlocks',0) > v.get('uniqueBlocks',0)
+                   for v in visitor_evidence):
+                raise AssertionError('Impossible visitor block membership counts')
+            # Visitor and AddInstruction call sites can be fully inlined.
+            # Never manufacture node membership from an exported symbol.
     record('host','PASS: Frida attach + ART discovery + fixture warmup')
 
 if __name__ == '__main__':

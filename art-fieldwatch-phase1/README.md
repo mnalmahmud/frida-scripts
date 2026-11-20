@@ -388,3 +388,38 @@ memory would be unsafe. IR mutation remains disabled.
 
 Source:
 https://android.googlesource.com/platform/art/+/refs/heads/android13-d4-s1-release/compiler/optimizing/nodes.cc
+
+## P1.3 optional block-to-instruction and traversal correlation
+
+Run [44763868026](https://github.com/mnalmahmud/frida-scripts/actions/runs/44763868026)
+passed all required CI jobs. The API33 compiler exports and executes
+`HGraph::AddBlock(HBasicBlock*)`, yielding real block pointers associated
+with the exact building `HGraph*`. The native observer confirmed 68
+block callbacks on the debug fixture and 343 on release; the sampled
+per-method block counts are 29 and 63, respectively.
+`GraphChecker::VisitBasicBlock` is exported but no matching
+optimization-phase callbacks were captured.
+
+To advance instruction ownership without undocumented pointer offsets,
+the P1.3 probe independently observes *all* executed exported
+`HBasicBlock::AddInstruction(HInstruction*)` calls, even outside the
+original field-builder stack frame. A match to one of the construction
+block identities correlates a concrete `HInstruction*` and its
+vtable-identified type with its containing `HBasicBlock*`.
+The existing `HInstanceFieldGet/Set::Accept` callbacks may then match
+that exact `kind@node` identity. This code remains **read-only**.
+
+The experiment separately checks the exported
+`HGraphVisitor::VisitBasicBlock` boundary and logs whether the
+compiler calls it during optimization; it compares those block
+pointers with construction-time identities. AOSP's
+`HGraphVisitor::VisitInsertionOrder/VisitReversePostOrder` functions
+are inventoried but **never invoked** by the probe. Any method inlined
+into its caller may yield no out-of-line callback, and this is
+recorded as a research limitation rather than fabricated traversal.
+
+This is not direct `HGraph::GetBlocks()` memory traversal, a mutable
+native shim, or runtime field-event emission. The stronger verified
+`HGraph::AddBlock` observation is now mandatory in API33 CI.
+See AOSP `nodes.cc` for graph visitor/block traversal structure:
+https://android.googlesource.com/platform/art/+/c32e770f21540e4e9eda6dc7f770e745d33f1b9f/compiler/optimizing/nodes.cc

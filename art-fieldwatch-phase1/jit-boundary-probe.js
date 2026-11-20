@@ -73,6 +73,11 @@ const NAMES = {
   runOptimizations: '_ZNK3art18OptimizingCompiler16RunOptimizationsEPNS_6HGraphEPNS_13CodeGeneratorERKNS_18DexCompilationUnitEPNS_12PassObserverE',
   graphAddBlock: '_ZN3art6HGraph8AddBlockEPNS_11HBasicBlockE',
   graphCheckerBlock: '_ZN3art12GraphChecker15VisitBasicBlockEPNS_11HBasicBlockE',
+  // Ordinary graph visitor exports are stronger evidence of traversal
+  // than GraphChecker, which is not necessarily run on release builds.
+  graphVisitorBlock: '_ZN3art13HGraphVisitor15VisitBasicBlockEPNS_11HBasicBlockE',
+  graphVisitorInsertion: '_ZN3art13HGraphVisitor19VisitInsertionOrderEv',
+  graphVisitorRpo: '_ZN3art13HGraphVisitor21VisitReversePostOrderEv',
   // Candidate exported signatures from instruction_builder.cc. Only use if
   // this exact ELF symbol exists on the running device.
   fieldInstance: '_ZN3art19HInstructionBuilder24BuildInstanceFieldAccessERKNS_11InstructionEjb',
@@ -191,7 +196,11 @@ function attach(layer, site) {
             optimizationEntries: 0, lseInvocations: 0,
             backendLocations: new Set(), backendEmitted: new Set(),
             constructionGraph: null, constructedBlocks: new Set(),
-            checkerBlocks: new Set(), unmatchedBlockCalls: 0
+            checkerBlocks: new Set(), visitorBlocks: new Set(),
+            visitorBlocksUnknown: new Set(),
+            blockInstructionMap: new Map(), fieldNodeInserts: 0,
+            graphAddInstructionCalls: 0, fieldVisitBlockMatches: 0,
+            unmatchedBlockCalls: 0
           });
           compiling.set(this.nativeThread, {method: this.method, kind: this.compilationKind});
           builtByThread.delete(this.nativeThread);
@@ -334,6 +343,18 @@ function attachGraphBoundary(layer, site) {
             if (this.ordinal <= SAMPLE_LIMIT)
               log('BLOCK_DISCOVERY ' + JSON.stringify(observation));
           }
+          if (state && matches === true) {
+            const event = {type:'artwatch-block-instruction-evidence',
+              method:this.method,compilationKind:this.kind,thread:this.nativeThread,
+              graph:this.graph,
+              addInstructionCalls:state.graphAddInstructionCalls,
+              fieldNodeInserts:state.fieldNodeInserts,
+              mappedFieldNodes:state.blockInstructionMap.size,
+              mappedExamples:[...state.blockInstructionMap.entries()].slice(0,8)};
+            send(event);
+            if (this.ordinal <= SAMPLE_LIMIT)
+              log('BLOCK_INSTRUCTIONS ' + JSON.stringify(event));
+          }
           this.shadowScopeStarted = false;
           if (shadowShim && matches === true) {
             try {
@@ -363,6 +384,17 @@ function attachGraphBoundary(layer, site) {
       onLeave(_retval) {
         if (layer === 'pre_opt') {
           const state = targetStates.get(this.nativeThread);
+          if (state && state.visitorBlocks.size > 0) {
+            const event = {type:'artwatch-block-visitor',
+              method:this.method,compilationKind:this.kind,thread:this.nativeThread,
+              graph:this.graph,uniqueBlocks:state.visitorBlocks.size,
+              newlySeenBlocks:state.visitorBlocksUnknown.size,
+              fieldVisitBlockMatches:state.fieldVisitBlockMatches,
+              samples:[...state.visitorBlocks].slice(0,12)};
+            send(event);
+            if (this.ordinal <= SAMPLE_LIMIT)
+              log('BLOCK_VISITOR ' + JSON.stringify(event));
+          }
           if (state && state.checkerBlocks.size > 0) {
             const event = {type:'artwatch-block-checker',
               method:this.method,compilationKind:this.kind,thread:this.nativeThread,
@@ -444,8 +476,18 @@ function attachBlockBoundary(layer, site) {
           if (!optimizationByThread.has(thread)) return;
           const block = args[1];
           if (block.isNull() || !Process.findRangeByAddress(block)) return;
-          if (state.checkerBlocks.size < 4096)
-            state.checkerBlocks.add(block.toString());
+          if (layer === 'graph_checker_block') {
+            if (state.checkerBlocks.size < 4096)
+              state.checkerBlocks.add(block.toString());
+          } else {
+            if (state.visitorBlocks.size < 4096)
+              state.visitorBlocks.add(block.toString());
+            // Inlining or loop transformations can add blocks after the
+            // construction boundary; log them, do not assume corruption.
+            if (!state.constructedBlocks.has(block.toString()) &&
+                state.visitorBlocksUnknown.size < 4096)
+              state.visitorBlocksUnknown.add(block.toString());
+          }
         }
       }
     });
@@ -561,6 +603,22 @@ function attachFieldNodeCandidate(site, source) {
       onEnter(args) {
         const thread = this.threadId;
         insertionCounts[source]++;
+        // Independent out-of-line AddInstruction experiment. This call
+        // supplies HBasicBlock* and HInstruction* without decoding either.
+        // The original field-builder-context experiment remains below.
+        if (source === 'basic-block') {
+          const state = targetStates.get(thread);
+          const block = args[0].toString();
+          if (state && state.constructedBlocks.has(block)) {
+            state.graphAddInstructionCalls++;
+            const kind = fieldKind(args[1]);
+            if (kind !== null && /Field(Get|Set)$/.test(kind)) {
+              state.fieldNodeInserts++;
+              if (state.blockInstructionMap.size < 4096)
+                state.blockInstructionMap.set(kind + '@' + args[1].toString(), block);
+            }
+          }
+        }
         const field = activeFieldBuilder.get(thread);
         if (!field) return;
         if (source === 'append' && args[0].toString() !== field.builder) return;
@@ -638,6 +696,13 @@ function attachFieldAccept(compiler) {
           }
           const phase = optimizationByThread.has(thread) ? 'optimizing' :
             (activeGraphBuild.has(thread) ? 'building' : 'other');
+          // Join a vtable-confirmed instruction with its containing block
+          // only when a real AddInstruction callback supplied both pointers.
+          const blockState = targetStates.get(thread);
+          if (blockState &&
+              blockState.blockInstructionMap.has(kind + '@' + node)) {
+            blockState.fieldVisitBlockMatches++;
+          }
           if (targetMethodPointers.has(compilation.method)) {
             const state = targetStates.get(thread);
             if (state) {
@@ -814,7 +879,9 @@ function main() {
     for (const name of [NAMES.internal, NAMES.publicCompile,
                         NAMES.compiler, NAMES.instance, NAMES.buildGraph,
                         NAMES.runOptimizations, NAMES.graphAddBlock,
-                        NAMES.graphCheckerBlock, NAMES.fieldInstance,
+                        NAMES.graphCheckerBlock, NAMES.graphVisitorBlock,
+                        NAMES.graphVisitorInsertion, NAMES.graphVisitorRpo,
+                        NAMES.fieldInstance,
                         NAMES.fieldStatic, NAMES.appendInstruction,
                         NAMES.addInstruction, NAMES.replaceWith,
                         NAMES.replaceAndRemove, NAMES.removeInstruction,
@@ -879,11 +946,22 @@ function main() {
     }
     for (const [layer, name] of [
       ['graph_add_block', NAMES.graphAddBlock],
-      ['graph_checker_block', NAMES.graphCheckerBlock]
+      ['graph_checker_block', NAMES.graphCheckerBlock],
+      ['graph_visitor_block', NAMES.graphVisitorBlock]
     ]) {
       const site = getExport(compiler, name);
       if (site) attachBlockBoundary(layer, site);
       else log('block-boundary-not-exported=' + layer);
+    }
+    for (const [role, symbol] of [
+      ['insertion-order', NAMES.graphVisitorInsertion],
+      ['reverse-post-order', NAMES.graphVisitorRpo]
+    ]) {
+      const site = getExport(compiler, symbol);
+      // Only record export availability. Calling these methods ourselves
+      // would require constructing a valid ART visitor object.
+      log('graph-traversal-export ' + role + '=' +
+          (site ? site.address : 'not-exported'));
     }
     discoverFieldVtables(compiler);
     // The app's onCreate() has not run at agent load time. Resolve the
