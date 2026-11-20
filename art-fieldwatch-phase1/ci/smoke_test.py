@@ -129,16 +129,24 @@ def main():
         observed_kinds = sorted({v['kind'] for v in typed})
         record('host', f'IR append hooks={len(append_hooks)} '
                f'candidate nodes={len(nodes)} typed={len(typed)} kinds={observed_kinds}')
-        # Diagnostic discovery: whether the device exports/inlines the
-        # append boundary is not assumed. If hooked but silent, report failure.
-        if append_hooks and not nodes:
-            raise AssertionError('IR append hook installed but no field-context callbacks')
+        visits = [v for v in payloads if v.get('type') == 'artwatch-ir-visit']
+        visit_kinds = sorted({v.get('kind') for v in visits if v.get('kind')})
+        matching_visits = [v for v in visits if v.get('vtableMatches') is True]
+        instance_types = [v for v in visits if v.get('kind') in
+                          ('HInstanceFieldGet','HInstanceFieldSet')]
+        record('host',f'IR visits={len(visits)} visit kinds={visit_kinds} '
+               f'vtable-matched={len(matching_visits)} '
+               f'instance-typed={len(instance_types)}')
         if nodes and not any(v.get('fieldIndexRaw') == 0 and
                              v.get('access') == 'instance' for v in nodes):
             raise AssertionError('No FieldIRTarget field IR append candidates')
         vtables = [v for v in payloads if v.get('type') == 'artwatch-ir-vtables']
         if vtables:
             record('host', f'IR vtables available={vtables[-1].get("available",[])}')
+        if not nodes and not instance_types:
+            raise AssertionError('No field IR nodes observed through insertion or Accept()')
+        if visits and not matching_visits:
+            raise AssertionError('Field Accept callback vtables did not match class identity')
     record('host','PASS: Frida attach + ART discovery + fixture warmup')
 
 if __name__ == '__main__':

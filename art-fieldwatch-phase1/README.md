@@ -82,3 +82,21 @@ The CI test fails if the append hook attaches but does not execute
 within field-building context. Missing export symbols are reported as
 an explicit *research gap* rather than falsely asserting unsupported ART
 or crashing the process. This is not yet a runtime access event.
+
+## Follow-up: out-of-line append versus virtual visitor
+
+Run 44708162512 verified both the `AppendInstruction` export and field
+node vtable exports, but zero callbacks reached `AppendInstruction`
+while `BuildInstanceFieldAccess` was active. This is consistent with an
+inlined call site, not proof that the instruction never enters the graph.
+
+This patch observes `HBasicBlock::AddInstruction` independently and hooks
+the exported `HInstanceFieldGet/Set::Accept(HGraphVisitor*)`, plus
+static/unresolved variants when available. The latter exposes actual IR
+object pointers during ordinary ART visitor passes; per-thread correlation
+ties them to JIT compilation without traversing arbitrary graph memory.
+
+It asserts that at least one field IR node is observed via either
+insertion or virtual visitor callbacks. Vtable matching distinguishes
+the actual node kind, but a visitor event alone does not establish that
+a particular DEX instruction survived a specific optimization pass.

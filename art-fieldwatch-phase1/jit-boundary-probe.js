@@ -14,6 +14,9 @@ const fieldCounts = {instance: 0, static: 0};
 const activeFieldBuilder = new Map();
 const FIELD_NODE_SAMPLE_LIMIT = 180;
 let observedFieldNodeCandidates = 0;
+let observedFieldAccepts = 0;
+const insertionCounts = {append: 0, 'basic-block': 0};
+const optimizationByThread = new Map();
 const knownFieldVtables = new Map();
 const FIELD_VTABLE_SYMBOLS = [
   ['HInstanceFieldGet', '_ZTVN3art17HInstanceFieldGetE'],
@@ -145,6 +148,8 @@ function attachGraphBoundary(layer, site) {
           activeGraphBuild.set(this.nativeThread, this.graphCandidate);
         } else {
           // const OptimizingCompiler* this, HGraph*, CodeGenerator*, ...
+          this.previousOptimization = optimizationByThread.get(this.nativeThread);
+          optimizationByThread.set(this.nativeThread, args[1].toString());
           this.graph = args[1].toString();
           const previous = builtByThread.get(this.nativeThread);
           const matches = previous && previous.graphCandidate !== null
@@ -161,6 +166,11 @@ function attachGraphBoundary(layer, site) {
         }
       },
       onLeave(_retval) {
+        if (layer === 'pre_opt') {
+          if (this.previousOptimization === undefined) optimizationByThread.delete(this.nativeThread);
+          else optimizationByThread.set(this.nativeThread, this.previousOptimization);
+          return;
+        }
         if (layer !== 'graph_builder') return;
         if (this.previousGraphBuild === undefined) activeGraphBuild.delete(this.nativeThread);
         else activeGraphBuild.set(this.nativeThread, this.previousGraphBuild);
@@ -259,11 +269,17 @@ function attachFieldNodeCandidate(site, source) {
     Interceptor.attach(site.address, {
       onEnter(args) {
         const thread = this.threadId;
+        insertionCounts[source]++;
         const field = activeFieldBuilder.get(thread);
-        if (!field || (source === 'append' && args[0].toString() !== field.builder)) return;
+        if (!field) return;
+        if (source === 'append' && args[0].toString() !== field.builder) return;
+        const node = args[1].toString();
+        // An append forwarding into AddInstruction is one logical insertion.
+        if (!field.seenNodes) field.seenNodes = new Set();
+        if (field.seenNodes.has(node)) return;
+        field.seenNodes.add(node);
         const ordinal = ++observedFieldNodeCandidates;
         if (ordinal > FIELD_NODE_SAMPLE_LIMIT) return;
-        const node = args[1].toString();
         let vtable = null;
         let kind = null;
         try {
@@ -289,6 +305,51 @@ function attachFieldNodeCandidate(site, source) {
     log('field-node-hook-error=' + source + ': ' + (e.stack || e));
     return false;
   }
+}
+// Every HInstruction field subclass has a virtual Accept(HGraphVisitor*).
+// On this API 33 ELF some of those functions are exported even when the
+// builder's call to AppendInstruction has been inlined into its caller.
+// These are observation-only callbacks during normal ART visitor passes.
+function attachFieldAccept(compiler) {
+  let attached = 0;
+  for (const [kind, symbol] of FIELD_VTABLE_SYMBOLS) {
+    const acceptName = symbol.replace('_ZTVN', '_ZN').replace(/E$/, '6AcceptEPNS_13HGraphVisitorE');
+    const site = getExport(compiler, acceptName);
+    if (!site) {
+      log('field-accept-not-exported=' + kind);
+      continue;
+    }
+    try {
+      Interceptor.attach(site.address, {
+        onEnter(args) {
+          const thread = this.threadId;
+          const compilation = compiling.get(thread);
+          if (!compilation) return;
+          const ordinal = ++observedFieldAccepts;
+          if (ordinal > FIELD_NODE_SAMPLE_LIMIT) return;
+          const node = args[0].toString();
+          const visitor = args[1].toString();
+          let vtable = null;
+          try { vtable = args[0].readPointer().toString(); }
+          catch (e) { log('field-accept-vtable-read-failed=' + e); }
+          const inferred = vtable ? knownFieldVtables.get(vtable) || null : null;
+          const event = {type: 'artwatch-ir-visit', source: 'accept',
+            ordinal, kind, vtableKind: inferred, vtableMatches: inferred === kind,
+            node, vtable, visitor, thread, method: compilation.method,
+            compilationKind: compilation.kind,
+            phase: optimizationByThread.has(thread) ? 'optimizing' :
+              (activeGraphBuild.has(thread) ? 'building' : 'other')};
+          send(event);
+          log('IR_VISIT ' + JSON.stringify(event));
+        }
+      });
+      attached++;
+      log('Attached field Accept observer kind=' + kind + ' at=' + site.address);
+      send({type: 'artwatch-hook-attached', layer: 'ir_accept', kind,
+        source: 'export', address: site.address.toString()});
+    } catch (e) { log('field-accept-hook-error=' + kind + ': ' + e); }
+  }
+  log('field-accept-hooks=' + attached);
 }
 function main() {
   const api = sdkLevel();
@@ -360,17 +421,14 @@ function main() {
       else log('field-builder-not-exported=' + access);
     }
     discoverFieldVtables(compiler);
-    // Prefer the builder's own out-of-line append; if absent use
-    // the HBasicBlock entry point. Both may be inlined on other builds.
+    // Do not assume the builder's exported AppendInstruction is called.
+    // Both out-of-line functions can coexist with inlined call sites.
     const append = getExport(compiler, NAMES.appendInstruction);
     const add = getExport(compiler, NAMES.addInstruction);
-    if (append && attachFieldNodeCandidate(append, 'append')) {
-      log('ir-append-mode=instruction-builder');
-    } else if (add && attachFieldNodeCandidate(add, 'basic-block')) {
-      log('ir-append-mode=basic-block');
-    } else {
-      log('ir-append-mode=not-exported-or-not-hookable');
-    }
+    const appendHook = append ? attachFieldNodeCandidate(append, 'append') : false;
+    const addHook = add ? attachFieldNodeCandidate(add, 'basic-block') : false;
+    log('ir-insertion-hooks=' + JSON.stringify({append: appendHook, add: addHook}));
+    attachFieldAccept(compiler);
   } else {
     log('graph-boundaries=disabled (unverified binary profile)');
   }
