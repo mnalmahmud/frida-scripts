@@ -165,6 +165,39 @@ function attach(layer, site) {
                 ' kinds=' + [...state.seenKinds].join(',') +
                 ' mutations=' + state.mutations.length);
           }
+          // Validate elimination on the same compilation and exact node.
+          // Only string identities are retained; node memory is never dereferenced
+          // after removal or after the JIT compilation returns.
+          if (state && targetMethodPointers.has(this.method) && state.mutations.length) {
+            const lifecycleByNode = new Map();
+            for (const mutation of state.mutations) {
+              if (!mutation.duringLse) continue;
+              const identity = mutation.kind + '@' + mutation.node;
+              let entry = lifecycleByNode.get(identity);
+              if (!entry) {
+                entry = {kind: mutation.kind, node: mutation.node,
+                  operations: [], replacement: null,
+                  visitedBeforeMutation: false};
+                lifecycleByNode.set(identity, entry);
+              }
+              entry.operations.push(mutation.op);
+              entry.visitedBeforeMutation ||= mutation.visitedBeforeMutation === true;
+              if (mutation.op === 'replace') entry.replacement = mutation.substitute;
+            }
+            const entries = Array.from(lifecycleByNode.values()).map(entry => {
+              const identity = entry.kind + '@' + entry.node;
+              return {...entry, lowered: state.backendLocations.has(identity),
+                emitted: state.backendEmitted.has(identity)};
+            });
+            if (entries.length) {
+              const event = {type: 'artwatch-field-lifecycle',
+                method: this.method, compilationKind: this.compilationKind,
+                compilationSucceeded: ret.toInt32() !== 0,
+                entries};
+              send(event);
+              log('FIELD_LIFECYCLE ' + JSON.stringify(event));
+            }
+          }
           if (state && this.ordinal <= SAMPLE_LIMIT) {
             const mutationCallDeltas = {};
             for (const [op, value] of Object.entries(mutationHookCounts)) {
@@ -516,7 +549,9 @@ function attachMutationObserver(site, op) {
           substitute: op === 'replace' ? args[1].toString() :
             (op === 'replace_remove' ? args[2].toString() : null),
           duringLse: lseByThread.has(thread),
-          duringOptimizations: optimizationByThread.has(thread)};
+          duringOptimizations: optimizationByThread.has(thread),
+          visitedBeforeMutation: targetMethodPointers.has(compilation.method)
+            ? state.uniqueNodes.has(kind + '@' + instruction.toString()) : null};
         if (fieldMutationTraceEmitted++ < FIELD_MUTATION_TRACE_LIMIT) {
           const event = {type:'artwatch-field-ir-mutation',
             method:compilation.method, compilationKind:compilation.kind,

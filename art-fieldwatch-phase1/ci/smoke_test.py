@@ -219,6 +219,35 @@ def main():
                f'mutation-call-summaries={len(mutation_calls)}')
         if variant == 'release' and not positive_lse:
             raise AssertionError('Release optimized JIT saw LSE but no Run() returned true')
+
+        # Exact-node evidence: source-level DEX read was present, and ART
+        # visited its HInstanceFieldGet before LSE replaced and removed it.
+        # The removed pointer must not appear in this compilation's backend.
+        lifecycles = [v for v in payloads
+                      if v.get('type') == 'artwatch-field-lifecycle']
+        eliminated_gets = [(lc, entry) for lc in lifecycles
+                           if lc.get('compilationKind') == 2
+                           and lc.get('compilationSucceeded') is True
+                           for entry in lc.get('entries', [])
+                           if entry.get('kind') == 'HInstanceFieldGet'
+                           and {'replace', 'remove'}.issubset(
+                               set(entry.get('operations', [])))
+                           and entry.get('visitedBeforeMutation') is True
+                           and entry.get('lowered') is False
+                           and entry.get('emitted') is False]
+        baseline_reads = [v for v in summaries
+                          if v.get('compilationKind') == 1 and
+                          v.get('compilationSucceeded') is True and
+                          any(str(k).startswith('HInstanceFieldGet@')
+                              for k in v.get('codeEmittedNodes', []))]
+        record('host', f'variant={variant} lifecycle-compilations={len(lifecycles)} '
+               f'optimized-removed-gets={len(eliminated_gets)} '
+               f'baseline-emitted-gets={len(baseline_reads)}')
+        if variant == 'release' and not eliminated_gets:
+            raise AssertionError('No exact HInstanceFieldGet visited, replaced and '
+                                 'removed during LSE without backend emission')
+        if variant == 'release' and not baseline_reads:
+            raise AssertionError('No baseline JIT get node observed at code emission')
     record('host','PASS: Frida attach + ART discovery + fixture warmup')
 
 if __name__ == '__main__':

@@ -239,3 +239,43 @@ source-level field read executed. All research hooks remain read-only.
 
 Relevant historical AOSP:
 https://android.googlesource.com/platform/art/+/0c0043d8cc/compiler/optimizing/code_generator_x86_64.cc
+
+## Exact-node field elimination proof (API 33 release)
+
+Run [44722172785](https://github.com/mnalmahmud/frida-scripts/actions/runs/44722172785)
+succeeded with both `iput` and `iget` in the **release**
+`testViaIdentity(int)` DEX. ART on API 33 entered real LSE and recorded
+seven vtable-validated field-node mutations: in optimized compilation
+`kind=2` of a method containing the fixture's field accesses, an
+`HInstanceFieldGet*` was replaced by another HInstruction and then
+removed. The same pointer had been observed by a compiler visitor
+before LSE. Removed nodes were absent from backend location assignment
+and emission in that successful compilation. This is compiler-time
+elimination, **not a runtime field callback**.
+
+The new `artwatch-field-lifecycle` event combines observations from
+the same JIT compilation using `kind + node address` as the temporary
+identity. The event records `visitedBeforeMutation`, the ordered
+mutation operations, the replacement pointer, and whether the node
+reached backend location assignment/code emission. No instruction
+memory is accessed after deletion or after compilation.
+
+**Strict API 33 release CI assertion:** a successfully optimized
+compilation must include an `HInstanceFieldGet` visited before
+replacement/removal during LSE that is absent from backend emission.
+As a control, an independently observed baseline compilation must
+still emit an `HInstanceFieldGet`. The debug tests retain their
+original assertions.
+
+**Method identity caveat:** the DEX-pattern matcher can identify
+inlined `iput`/`iget` operations within a caller, not just the
+standalone fixture method. Thus this proves elimination of actual
+field IR during optimized compilation, but does not claim that the
+standalone Java method was individually optimized or that its
+source-level access occurred as a physical field load.
+
+This research supports a decision to treat **logical DEX-level field
+events** separately from **physical compiled memory accesses**.
+A future compiler-side event sink would require side-effect ordering,
+exception/GC-safety analysis, field-target resolution and live-value
+mapping. No such sink or IR mutation is implemented yet.
