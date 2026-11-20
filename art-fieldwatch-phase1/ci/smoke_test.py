@@ -367,7 +367,7 @@ def main():
                 raise AssertionError('Field Accept visitor did not match active '
                                      'HGraphVisitor::VisitBasicBlock')
             for item in ownership:
-                if (item.get('uniqueFieldBlockPairs',0) > item.get('correlatedVisits',0):
+                if item.get('uniqueFieldBlockPairs',0) > item.get('correlatedVisits',0):
                     raise AssertionError('More unique ownership pairs than field visits')
                 if item.get('uniqueFieldNodes',0) > item.get('uniqueFieldBlockPairs',0):
                     raise AssertionError('More unique nodes than node-block pairs')
