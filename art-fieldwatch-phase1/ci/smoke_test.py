@@ -348,8 +348,34 @@ def main():
             if any(v.get('newlySeenBlocks',0) > v.get('uniqueBlocks',0)
                    for v in visitor_evidence):
                 raise AssertionError('Impossible visitor block membership counts')
-            # Visitor and AddInstruction call sites can be fully inlined.
-            # Never manufacture node membership from an exported symbol.
+            ownership = [v for v in payloads
+                         if v.get('type') == 'artwatch-field-block-ownership']
+            matched_visits = sum(v.get('correlatedVisits',0) for v in ownership)
+            get_visits = sum(v.get('getVisits',0) for v in ownership)
+            set_visits = sum(v.get('setVisits',0) for v in ownership)
+            pairs = sum(v.get('uniqueFieldBlockPairs',0) for v in ownership)
+            mismatches = sum(v.get('visitorPointerMismatches',0) for v in ownership)
+            record('host',f'Field->block visitor correlation scopes={len(ownership)} '
+                   f'visits={matched_visits} get={get_visits} set={set_visits} '
+                   f'node/block pairs={pairs} visitor mismatches={mismatches}')
+            if not ownership or matched_visits <= 0 or pairs <= 0:
+                raise AssertionError('No field instruction correlated with a '
+                                     'real HGraphVisitor basic-block callback')
+            if get_visits <= 0 or set_visits <= 0:
+                raise AssertionError('Visitor ownership missing field get or set')
+            if mismatches:
+                raise AssertionError('Field Accept visitor did not match active '
+                                     'HGraphVisitor::VisitBasicBlock')
+            for item in ownership:
+                if (item.get('uniqueFieldBlockPairs',0) > item.get('correlatedVisits',0):
+                    raise AssertionError('More unique ownership pairs than field visits')
+                if item.get('uniqueFieldNodes',0) > item.get('uniqueFieldBlockPairs',0):
+                    raise AssertionError('More unique nodes than node-block pairs')
+                if any(not sample.get('block') or not sample.get('node')
+                       for sample in item.get('examples',[])):
+                    raise AssertionError('Field ownership example missing pointer')
+            # Do not mistake observation during an ART traversal for a
+            # direct C++ layout walk, insertion event, or runtime read.
     record('host','PASS: Frida attach + ART discovery + fixture warmup')
 
 if __name__ == '__main__':

@@ -423,3 +423,35 @@ native shim, or runtime field-event emission. The stronger verified
 `HGraph::AddBlock` observation is now mandatory in API33 CI.
 See AOSP `nodes.cc` for graph visitor/block traversal structure:
 https://android.googlesource.com/platform/art/+/c32e770f21540e4e9eda6dc7f770e745d33f1b9f/compiler/optimizing/nodes.cc
+
+## P1.4 source-backed block-to-field instruction ownership
+
+Run [44787102253](https://github.com/mnalmahmud/frida-scripts/actions/runs/44787102253)
+passed API33 debug/release, API34 debug and static checks.
+`HGraphVisitor::VisitBasicBlock(HBasicBlock*)` is exported and actually
+executes: the release compiler recorded 300 basic-block observations
+across optimization scopes. The out-of-line `HBasicBlock::AddInstruction`
+export continued to produce zero matching insertion callbacks.
+
+The next experiment correlates the *dynamic extent* of
+`HGraphVisitor::VisitBasicBlock` (native thread, visitor object and
+block pointer) with `HInstanceFieldGet/Set::Accept(HGraphVisitor*)`.
+The AOSP `nodes.cc` implementation of `VisitBasicBlock` iterates
+phis/instructions and calls `instruction->Accept(this)`.
+The Frida probe therefore stores an active visitor/block pair in a
+thread-local JS map only until `VisitBasicBlock` returns and accepts
+an instruction association only if `Accept` supplies the *same visitor*.
+Nested visitors restore previous context in `onLeave`; no stale
+`HInstruction*` is dereferenced after a pass.
+
+Per-compilation `artwatch-field-block-ownership` reports unique
+field node/block pairs, get/set visit counts, visitor mismatches
+and a small set of vtable-confirmed pointer samples. API33 CI
+now requires actual correlated get **and** set visits, nonempty
+ownership pairs and zero visitor mismatches. This is an observation
+of fields traversed in a basic block, not an invocation of
+`GetBlocks()` and not a statement that every graph node survives
+optimization. Nothing mutates ART memory or invokes ART graph APIs.
+
+AOSP implementation reference:
+https://android.googlesource.com/platform/art/+/257ab7fe6885c83f1ab17fe9d4cc4a996ebd3c7e/compiler/optimizing/nodes.cc

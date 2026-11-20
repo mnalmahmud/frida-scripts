@@ -17,6 +17,8 @@ let observedFieldNodeCandidates = 0;
 let observedFieldAccepts = 0;
 const insertionCounts = {append: 0, 'basic-block': 0};
 const optimizationByThread = new Map();
+// Scoped to an actual out-of-line HGraphVisitor::VisitBasicBlock call.
+const activeVisitorBlockByThread = new Map();
 const knownFieldVtables = new Map();
 let shadowShim = null;
 let shadowModuleAttempted = false;
@@ -198,6 +200,9 @@ function attach(layer, site) {
             constructionGraph: null, constructedBlocks: new Set(),
             checkerBlocks: new Set(), visitorBlocks: new Set(),
             visitorBlocksUnknown: new Set(),
+            visitorFieldNodes: new Map(), visitorFieldPairs: new Map(),
+            visitorFieldVisits: 0, visitorFieldGetVisits: 0,
+            visitorFieldSetVisits: 0, visitorPointerMismatch: 0,
             blockInstructionMap: new Map(), fieldNodeInserts: 0,
             graphAddInstructionCalls: 0, fieldVisitBlockMatches: 0,
             unmatchedBlockCalls: 0
@@ -385,6 +390,20 @@ function attachGraphBoundary(layer, site) {
         if (layer === 'pre_opt') {
           const state = targetStates.get(this.nativeThread);
           if (state && state.visitorBlocks.size > 0) {
+            const fieldExamples = [...state.visitorFieldPairs.values()].slice(0,24);
+            const blockFieldEvent = {type:'artwatch-field-block-ownership',
+              method:this.method,compilationKind:this.kind,
+              thread:this.nativeThread,graph:this.graph,
+              correlatedVisits:state.visitorFieldVisits,
+              getVisits:state.visitorFieldGetVisits,
+              setVisits:state.visitorFieldSetVisits,
+              uniqueFieldNodes:state.visitorFieldNodes.size,
+              uniqueFieldBlockPairs:state.visitorFieldPairs.size,
+              visitorPointerMismatches:state.visitorPointerMismatch,
+              examples:fieldExamples};
+            send(blockFieldEvent);
+            if (this.ordinal <= SAMPLE_LIMIT)
+              log('FIELD_BLOCK_OWNERSHIP ' + JSON.stringify(blockFieldEvent));
             const event = {type:'artwatch-block-visitor',
               method:this.method,compilationKind:this.kind,thread:this.nativeThread,
               graph:this.graph,uniqueBlocks:state.visitorBlocks.size,
@@ -480,6 +499,15 @@ function attachBlockBoundary(layer, site) {
             if (state.checkerBlocks.size < 4096)
               state.checkerBlocks.add(block.toString());
           } else {
+            // Keep the active visitor+block pair only for the dynamic
+            // extent of this exact HGraphVisitor::VisitBasicBlock call.
+            // Frida onLeave restores nested calls without leaking state.
+            this.visitorBlockThread = thread;
+            this.previousVisitorBlock = activeVisitorBlockByThread.get(thread);
+            this.visitorBlockActive = true;
+            activeVisitorBlockByThread.set(thread, {
+              visitor: args[0].toString(), block: block.toString()
+            });
             if (state.visitorBlocks.size < 4096)
               state.visitorBlocks.add(block.toString());
             // Inlining or loop transformations can add blocks after the
@@ -489,6 +517,14 @@ function attachBlockBoundary(layer, site) {
               state.visitorBlocksUnknown.add(block.toString());
           }
         }
+      },
+      onLeave() {
+        if (this.visitorBlockActive !== true) return;
+        if (this.previousVisitorBlock === undefined)
+          activeVisitorBlockByThread.delete(this.visitorBlockThread);
+        else
+          activeVisitorBlockByThread.set(this.visitorBlockThread,
+            this.previousVisitorBlock);
       }
     });
     send({type:'artwatch-hook-attached',layer,source:'export',
@@ -702,6 +738,39 @@ function attachFieldAccept(compiler) {
           if (blockState &&
               blockState.blockInstructionMap.has(kind + '@' + node)) {
             blockState.fieldVisitBlockMatches++;
+          }
+          // ART's source-backed VisitBasicBlock iterates the instruction
+          // list and invokes instruction->Accept(this). Match the actual
+          // visitor object (args[1]) rather than guessing HInstruction
+          // block_ offsets. This is only a *visited* block ownership record,
+          // not construction-time insertion or a stable post-pass layout.
+          const currentBlock = activeVisitorBlockByThread.get(thread);
+          if (blockState && currentBlock &&
+              phase === 'optimizing' && inferred === kind) {
+            if (currentBlock.visitor === visitor) {
+              const isGet = /FieldGet$/.test(kind);
+              const isSet = /FieldSet$/.test(kind);
+              if (isGet || isSet) {
+                const id = kind + '@' + node;
+                const pairId = id + '|block=' + currentBlock.block;
+                blockState.visitorFieldVisits++;
+                if (isGet) blockState.visitorFieldGetVisits++;
+                if (isSet) blockState.visitorFieldSetVisits++;
+                if (blockState.visitorFieldNodes.size < 4096 &&
+                    !blockState.visitorFieldNodes.has(id))
+                  blockState.visitorFieldNodes.set(id, currentBlock.block);
+                if (blockState.visitorFieldPairs.size < 4096) {
+                  const existing = blockState.visitorFieldPairs.get(pairId);
+                  if (existing) existing.visits++;
+                  else blockState.visitorFieldPairs.set(pairId, {
+                    kind,node,block:currentBlock.block,visits:1,
+                    constructed: blockState.constructedBlocks.has(currentBlock.block)
+                  });
+                }
+              }
+            } else {
+              blockState.visitorPointerMismatch++;
+            }
           }
           if (targetMethodPointers.has(compilation.method)) {
             const state = targetStates.get(thread);
