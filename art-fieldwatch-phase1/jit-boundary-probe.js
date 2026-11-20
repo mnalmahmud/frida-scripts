@@ -19,6 +19,7 @@ const insertionCounts = {append: 0, 'basic-block': 0};
 const optimizationByThread = new Map();
 const knownFieldVtables = new Map();
 let shadowShim = null;
+let shadowModuleAttempted = false;
 let shadowGraphLogged = 0;
 let shadowNodeLogged = 0;
 const targetDexByMethod = new Map();
@@ -99,7 +100,12 @@ function loadPassiveShadow() {
   if (typeof globalThis.__artwatchShadowPath !== 'string' ||
       Process.arch !== 'x64') return;
   try {
-    const module = Module.load(globalThis.__artwatchShadowPath);
+    // Do not dlopen from Frida's namespace or from /data/local/tmp.
+    // The Android app loads its own library via System.loadLibrary() first.
+    const module = Process.findModuleByName(globalThis.__artwatchShadowPath);
+    if (module === null) return;
+    if (shadowModuleAttempted) return;
+    shadowModuleAttempted = true;
     function exported(name, ret, args) {
       const address = module.findExportByName(name);
       if (address === null) throw new Error('missing native shadow export=' + name);
@@ -298,6 +304,7 @@ function attachGraphBoundary(layer, site) {
           this.previousGraphBuild = activeGraphBuild.get(this.nativeThread);
           activeGraphBuild.set(this.nativeThread, this.graphCandidate);
         } else {
+          if (!shadowShim) loadPassiveShadow();
           // const OptimizingCompiler* this, HGraph*, CodeGenerator*, ...
           this.previousOptimization = optimizationByThread.get(this.nativeThread);
           optimizationByThread.set(this.nativeThread, args[1].toString());
@@ -523,6 +530,7 @@ function attachFieldAccept(compiler) {
           try { vtable = args[0].readPointer().toString(); }
           catch (e) { log('field-accept-vtable-read-failed=' + e); }
           const inferred = vtable ? knownFieldVtables.get(vtable) || null : null;
+          if (!shadowShim) loadPassiveShadow();
           if (shadowShim && inferred === kind &&
               (kind === 'HInstanceFieldGet' || kind === 'HInstanceFieldSet')) {
             try {
@@ -776,6 +784,8 @@ function main() {
       else log('field-builder-not-exported=' + access);
     }
     discoverFieldVtables(compiler);
+    // The app's onCreate() has not run at agent load time. Resolve the
+    // already-loaded shim lazily from compiler callbacks instead.
     loadPassiveShadow();
     // Do not assume the builder's exported AppendInstruction is called.
     // Both out-of-line functions can coexist with inlined call sites.

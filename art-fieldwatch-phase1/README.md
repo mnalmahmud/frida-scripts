@@ -299,3 +299,23 @@ P1 does **not** traverse HGraph blocks or construct an IR node. The
 test covers native-bridge callability and object validation, which
 are prerequisites for source-matched native traversal in the next
 phase. No field runtime monitoring has been implemented.
+
+## Native-library deployment fix (follow-up)
+
+CI run 44729819209 compiled the native shim on API33 debug and
+release, and ART's exact GNU build IDs were present, but both jobs
+failed because the app process could not map executable segments from
+`/data/local/tmp/libartwatch_shadow.so` (Permission denied). API34 and
+static checks passed. **This was a deployment/SELinux limitation, not a
+failure of graph or node-pointer validation.**
+
+The shim is now staged at `test/app/src/main/jniLibs/x86_64/` as an
+ephemeral NDK build output before `assembleDebug/assembleRelease`.
+The APK is built with legacy JNI extraction, so Android installs the
+library in the application's native library directory. The Java
+fixture loads it with `System.loadLibrary("artwatch_shadow")` in
+`MainActivity.onCreate()` before warmup, and the Frida agent resolves
+the *already loaded* ELF lazily when the first compiler callback
+occurs. No `dlopen` attempt from `/data/local/tmp`, global SELinux
+policy change or writable executable file mapping is used.
+API34 retains the previous monitoring behavior.

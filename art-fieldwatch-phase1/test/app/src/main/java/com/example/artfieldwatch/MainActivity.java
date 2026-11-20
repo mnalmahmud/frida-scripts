@@ -14,6 +14,17 @@ public final class MainActivity extends Activity {
   final boolean appDebuggable =
     (getApplicationInfo().flags & android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0;
   Log.i("ARTWATCH_CI","APP_DEBUGGABLE=" + appDebuggable);
+  // Load the native P1 companion from the APK on the API33 emulator.
+  // The Frida agent only looks up the already-loaded module and never
+  // tries to mmap a shared library from /data/local/tmp.
+  if (android.os.Build.VERSION.SDK_INT == 33) {
+   try {
+    System.loadLibrary("artwatch_shadow");
+    Log.i("ARTWATCH_CI","SHADOW_LIB_LOADED=true");
+   } catch (UnsatisfiedLinkError e) {
+    Log.e("ARTWATCH_CI","SHADOW_LIB_LOAD_FAILED",e);
+   }
+  }
   new Thread(() -> {
    long accumulator = 0;
    try {

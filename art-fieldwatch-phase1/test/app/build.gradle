@@ -17,6 +17,13 @@ android {
  lint {
   disable 'ExpiredTargetSdkVersion'
  }
+ // Ensure app-native libraries are extracted under the installed
+ // nativeLibraryDir, which has the correct executable file labeling.
+ packaging {
+  jniLibs {
+   useLegacyPackaging true
+  }
+ }
  buildTypes {
   release {
    // Keep the build non-debuggable while signing it for emulator installation.

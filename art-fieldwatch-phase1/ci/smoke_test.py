@@ -35,7 +35,7 @@ def main():
         source = (BASE/'jit-boundary-probe.js').read_text()
         if os.environ.get('ARTWATCH_SHADOW_SHIM') == '1':
             source = ('globalThis.__artwatchShadowPath = ' +
-                      json.dumps('/data/local/tmp/libartwatch_shadow.so') +
+                      json.dumps('libartwatch_shadow.so') +
                       ';\n' + source)
         script = session.create_script(source)
         script.on('message',on_message)
@@ -58,6 +58,9 @@ def main():
     expected_debug = 'true' if variant == 'debug' else 'false'
     if f'APP_DEBUGGABLE={expected_debug}' not in logs.stdout:
         raise AssertionError(f'Unexpected app debuggable flag for {variant} build')
+    if os.environ.get('ARTWATCH_SHADOW_SHIM') == '1':
+        if 'SHADOW_LIB_LOADED=true' not in logs.stdout:
+            raise AssertionError('App failed to load packaged native shadow library')
     if 'WARMUP_FAILED' in logs.stdout or 'WARMUP_DONE' not in logs.stdout:
         raise AssertionError('APK fixture warmup failed or timed out')
     hooked = [e['text'] for e in messages if e['kind']=='frida' and

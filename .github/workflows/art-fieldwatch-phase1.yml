@@ -86,6 +86,11 @@ jobs:
             *) exit 1 ;;
           esac
           gradle -p art-fieldwatch-phase1/test ":app:$task" --no-daemon
+      - name: Verify packaged native shadow library
+        if: matrix.api == 33
+        run: |
+          apk="art-fieldwatch-phase1/test/app/build/outputs/apk/$ARTWATCH_BUILD_VARIANT/app-$ARTWATCH_BUILD_VARIANT.apk"
+          unzip -l "$apk" | grep 'lib/x86_64/libartwatch_shadow.so'
       - name: Record compiled fixture DEX for D8 comparison
         run: bash art-fieldwatch-phase1/ci/dex-inventory.sh
       - run: python3 -m pip install 'frida==17.27.1'
