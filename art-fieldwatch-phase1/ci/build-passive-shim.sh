@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Pin the NDK and build only a passive Android 13 x86_64 ELF shared library.
+set -euo pipefail
+version="27.2.12479018"
+sdk="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+: "${sdk:?Set ANDROID_HOME or ANDROID_SDK_ROOT}"
+clang="$sdk/ndk/$version/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android33-clang"
+if [[ ! -x "$clang" ]]; then
+  yes | sdkmanager --install "ndk;$version" >/dev/null
+fi
+test -x "$clang"
+out="art-fieldwatch-phase1/native/out"
+mkdir -p "$out"
+"$clang" -std=c11 -O2 -fPIC -fvisibility=hidden -fstack-protector-strong \
+  -Wall -Wextra -Werror -shared -Wl,-z,relro -Wl,-z,now \
+  art-fieldwatch-phase1/native/passive-shadow.c -ldl \
+  -o "$out/libartwatch_shadow.so"
+file "$out/libartwatch_shadow.so"
+readelf -Ws "$out/libartwatch_shadow.so" | grep -E 'artwatch_shadow_(init|graph|node|report)' | tee "$out/exports.txt"
