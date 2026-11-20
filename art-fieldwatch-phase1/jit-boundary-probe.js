@@ -282,18 +282,24 @@ function attachFieldBuilder(access, site) {
           dexPc: args[2].toUInt32(), isPut: args[3].toInt32() !== 0,
           opcode, fieldIndexRaw, ordinal};
         activeFieldBuilder.set(thread, {...event, builder: args[0].toString()});
-        // FieldIRTarget.test(int): DEX 22c iput at PC 0 and iget at PC 2,
-        // both referencing field_idx 0 in the dedicated Java fixture.
-        if (access === 'instance' && fieldIndexRaw === 0 &&
+        // Match the same field index in iput@0 and iget@2 without assuming
+        // that DEX field indices are stable when other app code is modified.
+        if (access === 'instance' && fieldIndexRaw !== null &&
             ((opcode === 0x59 && event.dexPc === 0) ||
              (opcode === 0x52 && event.dexPc === 2))) {
-          const evidence = targetDexByMethod.get(active.method) || 0;
-          const bits = evidence | (opcode === 0x59 ? 1 : 2);
-          targetDexByMethod.set(active.method, bits);
+          let byField = targetDexByMethod.get(active.method);
+          if (!byField) {
+            byField = new Map();
+            targetDexByMethod.set(active.method, byField);
+          }
+          const bits = (byField.get(fieldIndexRaw) || 0) |
+            (opcode === 0x59 ? 1 : 2);
+          byField.set(fieldIndexRaw, bits);
           if (bits === 3 && !targetMethodPointers.has(active.method)) {
             targetMethodPointers.add(active.method);
-            const identified = {type: 'artwatch-target-dex', method: active.method,
-              dexPattern: 'iput@0,iget@2,field_idx=0'};
+            const identified = {type: 'artwatch-target-dex',
+              method: active.method, fieldIndexRaw,
+              dexPattern: 'iput@0,iget@2,same-field-index'};
             send(identified);
             log('TARGET_DEX ' + JSON.stringify(identified));
           }

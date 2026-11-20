@@ -159,3 +159,19 @@ at least one LSE invocation. If either is missing, it fails with
 a diagnostic instead of silently reporting an invalid optimization test.
 
 Source: https://android.googlesource.com/platform/art/+/master/compiler/optimizing/load_store_elimination.cc
+
+## CI harness correction after run 44713659551
+
+The API 33 release `assembleRelease` failed in
+`lintVitalRelease` because Google Play's
+`ExpiredTargetSdkVersion` check rejects the fixture's intentional
+targetSdk 28. Suppress only this Play-store publishing diagnostic;
+keep remaining lint checks enabled and preserve targetSdk for comparisons.
+
+The API 33 debug test reached ART and observed LSE calls, but the test
+method was not identified because adding the debuggable-flag logging
+changed the target field's raw DEX index from 0 to 1.
+The signature matcher now requires `iput@0` and `iget@2` on
+the *same* field index within the same compiled method, regardless
+of the actual index. This is a fixture fingerprint, not a general
+method-identity mechanism.
