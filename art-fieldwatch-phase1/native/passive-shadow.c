@@ -14,7 +14,7 @@
 #define RUNTIME_ID "c8b6a2df9893030c07b3b96dc24a7d30"
 
 static int ready = 0;
-static uint64_t graphs = 0, gets = 0, sets = 0, rejected = 0;
+static uint64_t graphs = 0, gets = 0, sets = 0, rejected = 0, blocks = 0;
 static uint64_t opaque_graph_word = 0;
 static int named(const char *path, const char *base) {
   if (path == NULL) return 0;
@@ -128,6 +128,19 @@ EXPORT int artwatch_shadow_graph(const void *graph, const void *builder_graph) {
   __atomic_fetch_add(&graphs, 1u, __ATOMIC_RELAXED);
   return 1;
 }
+// Read-only validation of pointers exposed by HGraph::AddBlock.
+ // We never dereference an HBasicBlock, and we store no block pointers.
+EXPORT int artwatch_shadow_block(const void *graph,
+                                const void *builder_graph,
+                                const void *block) {
+  if (ready != 1 || !aligned(graph) || graph != builder_graph ||
+      !aligned(block)) {
+    __atomic_fetch_add(&rejected, 1u, __ATOMIC_RELAXED);
+    return 0;
+  }
+  __atomic_fetch_add(&blocks, 1u, __ATOMIC_RELAXED);
+  return 1;
+}
 // Called in Get/Set::Accept. Itanium C++ vptr = exported vtable + 2 words.
 // Resolve vtable owner/name, then compare only the first pointer.
 EXPORT int artwatch_shadow_node(const void *node, const void *vt_symbol, int kind) {
@@ -180,11 +193,12 @@ EXPORT int artwatch_shadow_report(char *out, uint32_t length) {
   if (out == NULL || length < 96) return 0;
   int n = snprintf(out, length,
     "{\"ready\":%s,\"graphs\":%llu,\"gets\":%llu,\"sets\":%llu,"
-    "\"rejected\":%llu,\"opaqueGraphWord\":\"0x%llx\"}",
+    "\"blocks\":%llu,\"rejected\":%llu,\"opaqueGraphWord\":\"0x%llx\"}",
     ready == 1 ? "true" : "false",
     (unsigned long long)__atomic_load_n(&graphs, __ATOMIC_RELAXED),
     (unsigned long long)__atomic_load_n(&gets, __ATOMIC_RELAXED),
     (unsigned long long)__atomic_load_n(&sets, __ATOMIC_RELAXED),
+    (unsigned long long)__atomic_load_n(&blocks, __ATOMIC_RELAXED),
     (unsigned long long)__atomic_load_n(&rejected, __ATOMIC_RELAXED),
     (unsigned long long)__atomic_load_n(&opaque_graph_word, __ATOMIC_RELAXED));
   return n > 0 && (uint32_t)n < length ? 1 : 0;

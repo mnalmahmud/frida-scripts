@@ -33,6 +33,10 @@ abi="$(adb shell getprop ro.product.cpu.abi | tr -d '\r')"
     readelf -Ws "$tmp/$library" 2>&1 |
       grep -E '(LoadStoreElimination|LSEVisitor|HInstruction.*ReplaceWith|HBasicBlock.*RemoveInstruction|ReplaceAndRemoveInstruction)' |
       head -n 100 || true
+    echo "-- HGraph/AddBlock and graph checker exports --"
+    readelf -Ws "$tmp/$library" 2>&1 |
+      grep -E '(HGraph.*AddBlock|GraphChecker.*VisitBasicBlock|HGraph.*BuildDominatorTree|HBasicBlock.*GetFirstInstruction|HInstruction.*GetBlock|HGraphVisitor.*VisitBasicBlock)' |
+      head -n 100 || true
     echo "-- summary --"
     if readelf -SW "$tmp/$library" | grep -q ' \.symtab '; then
       echo 'full-symbol-table=present'

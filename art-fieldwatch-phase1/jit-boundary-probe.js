@@ -71,6 +71,8 @@ const NAMES = {
   instance: '_ZN3art3jit3Jit13jit_compiler_E',
   buildGraph: '_ZN3art13HGraphBuilder10BuildGraphEv',
   runOptimizations: '_ZNK3art18OptimizingCompiler16RunOptimizationsEPNS_6HGraphEPNS_13CodeGeneratorERKNS_18DexCompilationUnitEPNS_12PassObserverE',
+  graphAddBlock: '_ZN3art6HGraph8AddBlockEPNS_11HBasicBlockE',
+  graphCheckerBlock: '_ZN3art12GraphChecker15VisitBasicBlockEPNS_11HBasicBlockE',
   // Candidate exported signatures from instruction_builder.cc. Only use if
   // this exact ELF symbol exists on the running device.
   fieldInstance: '_ZN3art19HInstructionBuilder24BuildInstanceFieldAccessERKNS_11InstructionEjb',
@@ -121,7 +123,8 @@ function loadPassiveShadow() {
       node: exported('artwatch_shadow_node','int',['pointer','pointer','int']),
       report: exported('artwatch_shadow_report','int',['pointer','uint']),
       scopeBegin: exported('artwatch_shadow_scope_begin','int',['pointer']),
-      scopeEnd: exported('artwatch_shadow_scope_end','int',['pointer','uint'])
+      scopeEnd: exported('artwatch_shadow_scope_end','int',['pointer','uint']),
+      block: exported('artwatch_shadow_block','int',['pointer','pointer','pointer'])
     };
     send({type:'artwatch-shadow-init',ready:true,source:'native',
       buildIdVerified:true,mutable:false});
@@ -186,7 +189,9 @@ function attach(layer, site) {
             seenVisits: new Set(), seenKinds: new Set(), uniqueNodes: new Set(),
             visitsByPhase: {}, mutations: [], reported: 0,
             optimizationEntries: 0, lseInvocations: 0,
-            backendLocations: new Set(), backendEmitted: new Set()
+            backendLocations: new Set(), backendEmitted: new Set(),
+            constructionGraph: null, constructedBlocks: new Set(),
+            checkerBlocks: new Set(), unmatchedBlockCalls: 0
           });
           compiling.set(this.nativeThread, {method: this.method, kind: this.compilationKind});
           builtByThread.delete(this.nativeThread);
@@ -305,6 +310,8 @@ function attachGraphBoundary(layer, site) {
           catch (_) { this.graphCandidate = null; }
           this.previousGraphBuild = activeGraphBuild.get(this.nativeThread);
           activeGraphBuild.set(this.nativeThread, this.graphCandidate);
+          const state = targetStates.get(this.nativeThread);
+          if (state) state.constructionGraph = this.graphCandidate;
         } else {
           if (!shadowShim) loadPassiveShadow();
           // const OptimizingCompiler* this, HGraph*, CodeGenerator*, ...
@@ -316,6 +323,17 @@ function attachGraphBoundary(layer, site) {
           const previous = builtByThread.get(this.nativeThread);
           const matches = previous && previous.graphCandidate !== null
             ? previous.graphCandidate === this.graph : null;
+          if (state && matches === true) {
+            const observation = {type:'artwatch-block-discovery',
+              method:this.method,compilationKind:this.kind,thread:this.nativeThread,
+              graph:this.graph,source:'HGraph::AddBlock',
+              uniqueBlocks:state.constructedBlocks.size,
+              unmatched:state.unmatchedBlockCalls,
+              samples:[...state.constructedBlocks].slice(0,12)};
+            send(observation);
+            if (this.ordinal <= SAMPLE_LIMIT)
+              log('BLOCK_DISCOVERY ' + JSON.stringify(observation));
+          }
           this.shadowScopeStarted = false;
           if (shadowShim && matches === true) {
             try {
@@ -344,6 +362,16 @@ function attachGraphBoundary(layer, site) {
       },
       onLeave(_retval) {
         if (layer === 'pre_opt') {
+          const state = targetStates.get(this.nativeThread);
+          if (state && state.checkerBlocks.size > 0) {
+            const event = {type:'artwatch-block-checker',
+              method:this.method,compilationKind:this.kind,thread:this.nativeThread,
+              graph:this.graph,uniqueBlocks:state.checkerBlocks.size,
+              samples:[...state.checkerBlocks].slice(0,12)};
+            send(event);
+            if (this.ordinal <= SAMPLE_LIMIT)
+              log('BLOCK_CHECKER ' + JSON.stringify(event));
+          }
           if (this.shadowScopeStarted && shadowShim) {
             try {
               const buffer = Memory.alloc(512);
@@ -384,6 +412,49 @@ function attachGraphBoundary(layer, site) {
     return true;
   } catch (e) {
     log('Graph hook failed for ' + layer + ': ' + (e.stack || e));
+    return false;
+  }
+}
+// Source-backed and optional read-only graph/block function hooks.
+ // The two entry points are probes, not required compiler ABI exports.
+function attachBlockBoundary(layer, site) {
+  try {
+    Interceptor.attach(site.address, {
+      onEnter(args) {
+        const thread = this.threadId;
+        const state = targetStates.get(thread);
+        if (!state || !compiling.has(thread)) return;
+        if (layer === 'graph_add_block') {
+          const graph = args[0].toString();
+          const candidate = state.constructionGraph;
+          if (candidate === null || graph !== candidate) {
+            state.unmatchedBlockCalls++;
+            return;
+          }
+          const block = args[1];
+          if (block.isNull() || !Process.findRangeByAddress(block)) return;
+          if (!shadowShim) loadPassiveShadow();
+          if (shadowShim && shadowShim.block(args[0], ptr(candidate), block) !== 1) {
+            log('native-shadow-block-validation-rejected');
+            return;
+          }
+          if (state.constructedBlocks.size < 4096)
+            state.constructedBlocks.add(block.toString());
+        } else {
+          if (!optimizationByThread.has(thread)) return;
+          const block = args[1];
+          if (block.isNull() || !Process.findRangeByAddress(block)) return;
+          if (state.checkerBlocks.size < 4096)
+            state.checkerBlocks.add(block.toString());
+        }
+      }
+    });
+    send({type:'artwatch-hook-attached',layer,source:'export',
+      address:site.address.toString()});
+    log('Attached read-only block boundary=' + layer + ' at=' + site.address);
+    return true;
+  } catch(e) {
+    log('block-boundary-attach-error=' + layer + ' ' + (e.stack || e));
     return false;
   }
 }
@@ -742,7 +813,8 @@ function main() {
     // in injected processes (especially API 33 in earlier CI attempts).
     for (const name of [NAMES.internal, NAMES.publicCompile,
                         NAMES.compiler, NAMES.instance, NAMES.buildGraph,
-                        NAMES.runOptimizations, NAMES.fieldInstance,
+                        NAMES.runOptimizations, NAMES.graphAddBlock,
+                        NAMES.graphCheckerBlock, NAMES.fieldInstance,
                         NAMES.fieldStatic, NAMES.appendInstruction,
                         NAMES.addInstruction, NAMES.replaceWith,
                         NAMES.replaceAndRemove, NAMES.removeInstruction,
@@ -804,6 +876,14 @@ function main() {
       const site = getExport(compiler, name);
       if (site) attachFieldBuilder(access, site);
       else log('field-builder-not-exported=' + access);
+    }
+    for (const [layer, name] of [
+      ['graph_add_block', NAMES.graphAddBlock],
+      ['graph_checker_block', NAMES.graphCheckerBlock]
+    ]) {
+      const site = getExport(compiler, name);
+      if (site) attachBlockBoundary(layer, site);
+      else log('block-boundary-not-exported=' + layer);
     }
     discoverFieldVtables(compiler);
     // The app's onCreate() has not run at agent load time. Resolve the

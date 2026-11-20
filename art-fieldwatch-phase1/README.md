@@ -363,3 +363,28 @@ the NDK alone requires layout verification against the exact Android
 
 Reference for structural IR types (not an ABI guarantee):
 https://android.googlesource.com/platform/art/+/refs/heads/android13-d4-s1-release/compiler/optimizing/nodes.h
+
+## P1.2 optional source-backed basic-block discovery
+
+The published ART `nodes.cc` defines `HGraph::AddBlock(HBasicBlock*)`,
+and `GraphChecker::VisitBasicBlock(HBasicBlock*)` is a separate
+graph-verification boundary. They are candidates for **observing live
+basic-block identities without assuming private object offsets**.
+
+The API33 x86_64 probe checks the exact exported symbols, and attaches
+read-only callbacks only if present. `AddBlock` pointers must match
+the graph candidate captured during the active HGraphBuilder call.
+The passive native shim validates the supplied graph/block addresses
+without dereferencing HBasicBlock or retaining a pointer after the
+callback. `GraphChecker` block observations are logged separately.
+Counts are correlated to the active JIT method and its optimization
+boundary. Missing exports or inlined call sites are reported as research
+gaps, **not** as evidence of an empty graph.
+
+This experiment does **not** claim native traversal of
+`HGraph::GetBlocks()`: that accessor is inline, its member layout
+is not certified against the emulator ABI, and scanning guessed C++
+memory would be unsafe. IR mutation remains disabled.
+
+Source:
+https://android.googlesource.com/platform/art/+/refs/heads/android13-d4-s1-release/compiler/optimizing/nodes.cc

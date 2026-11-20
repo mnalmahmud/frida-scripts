@@ -305,6 +305,25 @@ def main():
             if any(v.get('uniqueGets',0) > v.get('getVisits',0) or
                    v.get('uniqueSets',0) > v.get('setVisits',0) for v in scopes):
                 raise AssertionError('Native field inventory has inconsistent counts')
+            block_hooks = [v for v in payloads
+                           if v.get('type') == 'artwatch-hook-attached'
+                           and v.get('layer') in ('graph_add_block',
+                                                  'graph_checker_block')]
+            constructed = [v for v in payloads
+                           if v.get('type') == 'artwatch-block-discovery']
+            checked = [v for v in payloads
+                       if v.get('type') == 'artwatch-block-checker']
+            unique_blocks = sum(v.get('uniqueBlocks',0) for v in constructed)
+            checked_blocks = sum(v.get('uniqueBlocks',0) for v in checked)
+            record('host', f'Graph block hooks={sorted({v.get("layer") for v in block_hooks})} '
+                   f'created unique={unique_blocks} checked unique={checked_blocks} '
+                   f'native block callbacks={stats[-1].get("blocks",0)}')
+            if any(v.get('uniqueBlocks',0) < 0 or v.get('unmatched',0) < 0
+                   for v in constructed):
+                raise AssertionError('Invalid graph block discovery counts')
+            if unique_blocks and stats[-1].get('blocks',0) < unique_blocks:
+                raise AssertionError('Native block confirmations smaller than unique discoveries')
+            # Out-of-line graph functions may be absent or silent after inlining.
     record('host','PASS: Frida attach + ART discovery + fixture warmup')
 
 if __name__ == '__main__':
