@@ -175,3 +175,39 @@ The signature matcher now requires `iput@0` and `iget@2` on
 the *same* field index within the same compiled method, regardless
 of the actual index. This is a fixture fingerprint, not a general
 method-identity mechanism.
+
+## Release DEX / field mutation research follow-up
+
+Run 44716336483 passed API 33 debug and API 34 debug. The new
+API 33 non-debuggable release job **booted and ran ART**, including
+`LoadStoreElimination::Run(bool)` with several `true` returns, but the
+strict target-method DEX fingerprint was absent. Its field-builder logs
+contained an `iput` for the target's field index but no corresponding
+`iget` in that method. D8 has a redundant-field-load elimination pass
+that can remove such a read *before ART sees the DEX*, so **do not
+attribute this disappearance to ART LSE without direct DEX evidence**.
+
+The new `ci/dex-inventory.sh` saves the actual debug/release
+`FieldIRTarget` smali using Android SDK `apkanalyzer` (or reports
+tool unavailability) along with DEX SHA-256 in CI artifacts.
+
+The release CI now requires an optimized JIT compilation and at least
+one LSE pass returning `true`, but does *not* require the debug-only
+`iput@0/iget@2` DEX fingerprint. The debug CI continues its strict
+get/set IR assertions.
+
+The API 33 observer now also recognizes
+`HBasicBlock::ReplaceAndRemoveInstructionWith` and
+`RemoveInstructionOrPhi`, and records vtable-verified field-node
+replacements/removals across **all** compilation methods, not only the
+one that may have been transformed by D8. Per-compilation call deltas
+distinguish an exported hook from an actually executed call.
+
+The experiment is still read-only. A `true` LSE return does not, by
+itself, prove any specific field read was removed, nor does it imply
+a runtime field event.
+
+Sources:
+- https://r8.googlesource.com/r8/+/main/src/main/java/com/android/tools/r8/ir/optimize/RedundantFieldLoadAndStoreElimination.java
+- https://developer.android.com/tools/apkanalyzer
+- https://android.googlesource.com/platform/art/+/master/compiler/optimizing/load_store_elimination.cc

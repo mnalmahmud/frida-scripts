@@ -165,12 +165,16 @@ def main():
                f'target IR={len(target_ir)} kinds={target_kinds} '
                f'target summaries={len(summaries)} '
                f'mutation hooks={mutation_hooks} mutation events={len(mutations)}')
-        if not targets:
-            raise AssertionError('FieldIRTarget.test DEX pattern not identified')
-        if not summaries:
-            raise AssertionError('No compiler summary for FieldIRTarget.test')
-        if not {'HInstanceFieldGet','HInstanceFieldSet'}.issubset(set(target_kinds)):
-            raise AssertionError('FieldIRTarget.test get/set IR nodes not both seen')
+        if variant == 'debug':
+            if not targets:
+                raise AssertionError('Debug FieldIRTarget.test DEX pattern not identified')
+            if not summaries:
+                raise AssertionError('No debug compiler summary for FieldIRTarget.test')
+            if not {'HInstanceFieldGet','HInstanceFieldSet'}.issubset(set(target_kinds)):
+                raise AssertionError('Debug FieldIRTarget.test get/set IR nodes not both seen')
+        else:
+            record('host', 'Release DEX target fingerprint is diagnostic: '
+                   'the missing iget may have been eliminated by D8 before ART JIT')
         # Mutation/LSE hookability is a new hypothesis; missing exports are
         # recorded, but do not invalidate the verified field-node capture.
         phases = [v for v in payloads
@@ -185,6 +189,20 @@ def main():
             raise AssertionError('Non-debuggable release fixture did not trigger optimized JIT')
         if variant == 'release' and not lse:
             raise AssertionError('No LSE::Run invocation observed in non-debuggable optimized JIT')
+        positive_lse = [v for v in payloads
+                        if v.get('type') == 'artwatch-lse'
+                        and v.get('phase') == 'exit'
+                        and v.get('compilationKind') == 2
+                        and v.get('result') is True]
+        field_mutations = [v for v in payloads
+                           if v.get('type') == 'artwatch-field-ir-mutation']
+        mutation_calls = [v for v in payloads
+                          if v.get('type') == 'artwatch-mutation-call-summary']
+        record('host', f'variant={variant} optimized-LSE-changes={len(positive_lse)} '
+               f'field-IR-mutations={len(field_mutations)} '
+               f'mutation-call-summaries={len(mutation_calls)}')
+        if variant == 'release' and not positive_lse:
+            raise AssertionError('Release optimized JIT saw LSE but no Run() returned true')
     record('host','PASS: Frida attach + ART discovery + fixture warmup')
 
 if __name__ == '__main__':

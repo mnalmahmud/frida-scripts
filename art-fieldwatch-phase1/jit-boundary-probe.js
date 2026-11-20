@@ -23,9 +23,11 @@ const targetMethodPointers = new Set();
 const targetStates = new Map();
 const targetReportLimit = 36;
 const lseByThread = new Map();
-const mutationHookCounts = {replace: 0, remove: 0, lse: 0};
+const mutationHookCounts = {replace: 0, replace_remove: 0, remove: 0, remove_or_phi: 0, lse: 0};
 let lseTraceEmitted = 0;
 const LSE_TRACE_LIMIT = 80;
+let fieldMutationTraceEmitted = 0;
+const FIELD_MUTATION_TRACE_LIMIT = 160;
 function fieldKind(ptr) {
   try { return knownFieldVtables.get(ptr.readPointer().toString()) || null; }
   catch (_) { return null; }
@@ -71,7 +73,9 @@ const NAMES = {
   // ABI candidates; check exact runtime exports and archive matching ELF names.
   // All are read-only observers, no replacement or mutation is performed.
   replaceWith: '_ZN3art12HInstruction11ReplaceWithEPS0_',
+  replaceAndRemove: '_ZN3art11HBasicBlock31ReplaceAndRemoveInstructionWithEPNS_12HInstructionES2_',
   removeInstruction: '_ZN3art11HBasicBlock17RemoveInstructionEPNS_12HInstructionEb',
+  removeInstructionOrPhi: '_ZN3art11HBasicBlock22RemoveInstructionOrPhiEPNS_12HInstructionEb',
   lseRun: '_ZN3art20LoadStoreElimination3RunEv',
   lseRunBool: '_ZN3art20LoadStoreElimination3RunEb'
 };
@@ -120,6 +124,7 @@ function attach(layer, site) {
           this.nativeThread = this.threadId;
           this.previousCompilation = compiling.get(this.nativeThread);
           this.previousTargetState = targetStates.get(this.nativeThread);
+          this.mutationCountsAtEnter = {...mutationHookCounts};
           targetStates.set(this.nativeThread, {
             method: this.method, kind: this.compilationKind,
             seenVisits: new Set(), seenKinds: new Set(), uniqueNodes: new Set(),
@@ -151,6 +156,12 @@ function attach(layer, site) {
                 ' mutations=' + state.mutations.length);
           }
           if (state && this.ordinal <= SAMPLE_LIMIT) {
+            const mutationCallDeltas = {};
+            for (const [op, value] of Object.entries(mutationHookCounts)) {
+              mutationCallDeltas[op] = value - (this.mutationCountsAtEnter[op] || 0);
+            }
+            send({type: 'artwatch-mutation-call-summary', method:this.method,
+              compilationKind:this.compilationKind, calls:mutationCallDeltas});
             send({type: 'artwatch-phase-summary', method: this.method,
               compilationKind: this.compilationKind,
               isFieldTarget: targetMethodPointers.has(this.method),
@@ -460,6 +471,8 @@ function attachMutationObserver(site, op) {
         mutationHookCounts[op]++;
         if (op === 'lse') {
           this.lseThread = thread;
+          this.lseMethod = compilation.method;
+          this.lseKind = compilation.kind;
           this.lsePrevious = lseByThread.get(thread);
           lseByThread.set(thread, true);
           state.lseInvocations++;
@@ -479,23 +492,36 @@ function attachMutationObserver(site, op) {
           }
           return;
         }
-        if (!targetMethodPointers.has(compilation.method)) return;
+        // Observe all field instructions, not just a fixture method whose
+        // redundant load may already have disappeared in release DEX.
         const instruction = op === 'replace' ? args[0] : args[1];
         const kind = fieldKind(instruction);
         if (!kind) return;
         const record = {op, kind, node: instruction.toString(),
-          substitute: op === 'replace' ? args[1].toString() : null,
+          substitute: op === 'replace' ? args[1].toString() :
+            (op === 'replace_remove' ? args[2].toString() : null),
           duringLse: lseByThread.has(thread),
           duringOptimizations: optimizationByThread.has(thread)};
-        state.mutations.push(record);
-        reportTargetEvent(state, {type:'artwatch-ir-mutation',
-          method:compilation.method, compilationKind:compilation.kind,
-          thread, ...record});
+        if (fieldMutationTraceEmitted++ < FIELD_MUTATION_TRACE_LIMIT) {
+          const event = {type:'artwatch-field-ir-mutation',
+            method:compilation.method, compilationKind:compilation.kind,
+            thread, isFieldTarget:targetMethodPointers.has(compilation.method),
+            ...record};
+          send(event);
+          log('FIELD_MUTATION ' + JSON.stringify(event));
+        }
+        if (targetMethodPointers.has(compilation.method)) {
+          state.mutations.push(record);
+          reportTargetEvent(state, {type:'artwatch-ir-mutation',
+            method:compilation.method, compilationKind:compilation.kind,
+            thread, ...record});
+        }
       },
       onLeave(retval) {
         if (op !== 'lse' || this.lseThread === undefined) return;
         if (this.lseReport) {
           const event = {type:'artwatch-lse', phase:'exit',
+            method:this.lseMethod, compilationKind:this.lseKind,
             thread:this.lseThread, result:retval.and(0xff).toInt32() !== 0};
           send(event);
           log('LSE ' + JSON.stringify(event));
@@ -524,7 +550,8 @@ function main() {
                         NAMES.runOptimizations, NAMES.fieldInstance,
                         NAMES.fieldStatic, NAMES.appendInstruction,
                         NAMES.addInstruction, NAMES.replaceWith,
-                        NAMES.removeInstruction, NAMES.lseRun,
+                        NAMES.replaceAndRemove, NAMES.removeInstruction,
+                        NAMES.removeInstructionOrPhi, NAMES.lseRun,
                         NAMES.lseRunBool, 'jit_load']) {
       try {
         const site = getExport(module, name);
@@ -592,7 +619,9 @@ function main() {
     attachFieldAccept(compiler);
     for (const [op, names] of [
       ['replace', [NAMES.replaceWith]],
+      ['replace_remove', [NAMES.replaceAndRemove]],
       ['remove', [NAMES.removeInstruction]],
+      ['remove_or_phi', [NAMES.removeInstructionOrPhi]],
       ['lse', [NAMES.lseRun, NAMES.lseRunBool]]
     ]) {
       const site = names.map(n => getExport(compiler, n)).find(p => p !== null);

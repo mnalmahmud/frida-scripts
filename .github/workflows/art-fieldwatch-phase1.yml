@@ -18,6 +18,7 @@ jobs:
       - run: node --check art-fieldwatch-phase1/jit-boundary-probe.js
       - run: python3 -m py_compile art-fieldwatch-phase1/ci/smoke_test.py
       - run: bash -n art-fieldwatch-phase1/ci/run-emulator-smoke.sh
+      - run: bash -n art-fieldwatch-phase1/ci/dex-inventory.sh
   android:
     runs-on: ubuntu-latest
     timeout-minutes: 35
@@ -80,6 +81,8 @@ jobs:
             *) exit 1 ;;
           esac
           gradle -p art-fieldwatch-phase1/test ":app:$task" --no-daemon
+      - name: Record compiled fixture DEX for D8 comparison
+        run: bash art-fieldwatch-phase1/ci/dex-inventory.sh
       - run: python3 -m pip install 'frida==17.27.1'
       - uses: reactivecircus/android-emulator-runner@v2
         with:
