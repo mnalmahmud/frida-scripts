@@ -211,3 +211,31 @@ Sources:
 - https://r8.googlesource.com/r8/+/main/src/main/java/com/android/tools/r8/ir/optimize/RedundantFieldLoadAndStoreElimination.java
 - https://developer.android.com/tools/apkanalyzer
 - https://android.googlesource.com/platform/art/+/master/compiler/optimizing/load_store_elimination.cc
+
+## Read-only backend field lowering experiment
+
+Run 44718929267 passed all required jobs and proved through
+`apkanalyzer` that `FieldIRTarget.test(int)` contains `iput` + `iget`
+in debug DEX, but *only `iput` + `return p1`* in release DEX.
+This is a D8/build-time transformation, not evidence of ART LSE.
+
+`FieldIRTarget.testViaIdentity(int)` now passes the receiver through
+a trivial helper before re-reading its field. The release DEX inventory
+**strictly requires** the new method to contain both an `iput` and
+an `iget`, otherwise CI fails before the emulator starts. This
+separates build-time preservation from ART's runtime JIT optimizer.
+
+On API 33 x86_64, the read-only Frida probe also hooks the exported
+`LocationsBuilderX86_64::VisitInstanceFieldGet/Set` and
+`InstructionCodeGeneratorX86_64::VisitInstanceFieldGet/Set`
+entry points. Their `HInstruction*` arguments are verified against
+the exact exported field-node vtable. Observer events are associated
+with the current compiled method and IR node address; per-compilation
+summaries list nodes reaching location assignment and code emission.
+
+**A code emission visitor callback is a compile-time observation, not
+a runtime field event**, and neither stage proves an optimized-away
+source-level field read executed. All research hooks remain read-only.
+
+Relevant historical AOSP:
+https://android.googlesource.com/platform/art/+/0c0043d8cc/compiler/optimizing/code_generator_x86_64.cc

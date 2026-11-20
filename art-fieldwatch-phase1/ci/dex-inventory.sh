@@ -23,6 +23,20 @@ if "$analyzer" dex code --class com.example.artfieldwatch.FieldIRTarget "$apk" >
   echo "-- FieldIRTarget actual DEX instructions, $variant --"
   grep -E '^\.method|^[[:space:]]*\.method|iput|iget|invoke|return' "$out/fieldir-$variant.smali" | head -n 90 || true
   echo "-- DEX dump saved in $out/fieldir-$variant.smali --"
+  # The release test must preserve both instructions in the *new* method.
+  # The old test() intentionally demonstrates release DEX simplification.
+  if [[ "$variant" == release ]]; then
+    awk '/^\.method public testViaIdentity\(I\)I/ { inside=1; next }
+         inside && /^\.end method/ { exit }
+         inside { print }' "$out/fieldir-$variant.smali" > "$out/fieldir-release-identity.smali"
+    if ! grep -q 'iput' "$out/fieldir-release-identity.smali" ||
+       ! grep -q 'iget' "$out/fieldir-release-identity.smali"; then
+      echo "::error::Release DEX removed iget/iput from testViaIdentity; ART LSE cannot be tested with it."
+      cat "$out/fieldir-release-identity.smali"
+      exit 1
+    fi
+    echo "Verified release testViaIdentity DEX retains both iput and iget."
+  fi
 else
   echo "apkanalyzer failed; preserving stderr as diagnostic"
   cat "$out/fieldir-$variant.stderr"

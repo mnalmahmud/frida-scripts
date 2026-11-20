@@ -189,6 +189,22 @@ def main():
             raise AssertionError('Non-debuggable release fixture did not trigger optimized JIT')
         if variant == 'release' and not lse:
             raise AssertionError('No LSE::Run invocation observed in non-debuggable optimized JIT')
+        backend_hooks = [v for v in payloads
+                         if v.get('type') == 'artwatch-hook-attached'
+                         and str(v.get('layer','')).startswith('backend_field_')]
+        backend_events = [v for v in payloads
+                          if v.get('type') == 'artwatch-backend-field']
+        lowered = [v for v in backend_events if v.get('stage') == 'locations']
+        emitted = [v for v in backend_events if v.get('stage') == 'emission']
+        record('host', f'backend field hooks={len(backend_hooks)} '
+               f'locations={len(lowered)} emission={len(emitted)} '
+               f'emitted kinds={sorted({v.get("expectedKind") for v in emitted})}')
+        if len(backend_hooks) != 4:
+            raise AssertionError('Expected four API33 x86_64 backend field visitor hooks')
+        if not lowered and not emitted:
+            raise AssertionError('No instance-field IR nodes reached backend field visitors')
+        if variant == 'release' and not targets:
+            raise AssertionError('Release fixture did not produce any method with iget+iput DEX')
         positive_lse = [v for v in payloads
                         if v.get('type') == 'artwatch-lse'
                         and v.get('phase') == 'exit'

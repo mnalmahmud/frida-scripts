@@ -19,6 +19,9 @@ const insertionCounts = {append: 0, 'basic-block': 0};
 const optimizationByThread = new Map();
 const knownFieldVtables = new Map();
 const targetDexByMethod = new Map();
+let backendVisitOrdinal = 0;
+const BACKEND_VISIT_LIMIT = 160;
+const backendCounts = {locations: 0, emission: 0};
 const targetMethodPointers = new Set();
 const targetStates = new Map();
 const targetReportLimit = 36;
@@ -76,6 +79,10 @@ const NAMES = {
   replaceAndRemove: '_ZN3art11HBasicBlock31ReplaceAndRemoveInstructionWithEPNS_12HInstructionES2_',
   removeInstruction: '_ZN3art11HBasicBlock17RemoveInstructionEPNS_12HInstructionEb',
   removeInstructionOrPhi: '_ZN3art11HBasicBlock22RemoveInstructionOrPhiEPNS_12HInstructionEb',
+  x64LocationsFieldGet: '_ZN3art6x86_6422LocationsBuilderX86_6421VisitInstanceFieldGetEPNS_17HInstanceFieldGetE',
+  x64LocationsFieldSet: '_ZN3art6x86_6422LocationsBuilderX86_6421VisitInstanceFieldSetEPNS_17HInstanceFieldSetE',
+  x64EmitFieldGet: '_ZN3art6x86_6430InstructionCodeGeneratorX86_6421VisitInstanceFieldGetEPNS_17HInstanceFieldGetE',
+  x64EmitFieldSet: '_ZN3art6x86_6430InstructionCodeGeneratorX86_6421VisitInstanceFieldSetEPNS_17HInstanceFieldSetE',
   lseRun: '_ZN3art20LoadStoreElimination3RunEv',
   lseRunBool: '_ZN3art20LoadStoreElimination3RunEb'
 };
@@ -129,7 +136,8 @@ function attach(layer, site) {
             method: this.method, kind: this.compilationKind,
             seenVisits: new Set(), seenKinds: new Set(), uniqueNodes: new Set(),
             visitsByPhase: {}, mutations: [], reported: 0,
-            optimizationEntries: 0, lseInvocations: 0
+            optimizationEntries: 0, lseInvocations: 0,
+            backendLocations: new Set(), backendEmitted: new Set()
           });
           compiling.set(this.nativeThread, {method: this.method, kind: this.compilationKind});
           builtByThread.delete(this.nativeThread);
@@ -148,6 +156,8 @@ function attach(layer, site) {
               uniqueNodeCount: state.uniqueNodes.size,
               visitsByPhase: state.visitsByPhase,
               mutations: state.mutations,
+              locationsNodes: [...state.backendLocations],
+              codeEmittedNodes: [...state.backendEmitted],
               compilationSucceeded: ret.toInt32() !== 0
             });
             log('TARGET_SUMMARY method=' + this.method + ' kind=' +
@@ -293,24 +303,29 @@ function attachFieldBuilder(access, site) {
           dexPc: args[2].toUInt32(), isPut: args[3].toInt32() !== 0,
           opcode, fieldIndexRaw, ordinal};
         activeFieldBuilder.set(thread, {...event, builder: args[0].toString()});
-        // Match the same field index in iput@0 and iget@2 without assuming
-        // that DEX field indices are stable when other app code is modified.
+        // Identify self-contained field read/write methods from DEX patterns,
+        // not only the old iput@0/iget@2 pattern. The release fixture adds
+        // identity(this) between iput and iget so both survive D8.
         if (access === 'instance' && fieldIndexRaw !== null &&
-            ((opcode === 0x59 && event.dexPc === 0) ||
-             (opcode === 0x52 && event.dexPc === 2))) {
+            (opcode === 0x59 || opcode === 0x52)) {
           let byField = targetDexByMethod.get(active.method);
           if (!byField) {
             byField = new Map();
             targetDexByMethod.set(active.method, byField);
           }
-          const bits = (byField.get(fieldIndexRaw) || 0) |
-            (opcode === 0x59 ? 1 : 2);
-          byField.set(fieldIndexRaw, bits);
-          if (bits === 3 && !targetMethodPointers.has(active.method)) {
+          const prior = byField.get(fieldIndexRaw) || {bits: 0, putPc: null, getPc: null};
+          const updated = {
+            bits: prior.bits | (opcode === 0x59 ? 1 : 2),
+            putPc: opcode === 0x59 ? event.dexPc : prior.putPc,
+            getPc: opcode === 0x52 ? event.dexPc : prior.getPc
+          };
+          byField.set(fieldIndexRaw, updated);
+          if (updated.bits === 3 && !targetMethodPointers.has(active.method)) {
             targetMethodPointers.add(active.method);
             const identified = {type: 'artwatch-target-dex',
               method: active.method, fieldIndexRaw,
-              dexPattern: 'iput@0,iget@2,same-field-index'};
+              dexPattern: 'iput+iget,same-field-index',
+              putPc: updated.putPc, getPc: updated.getPc};
             send(identified);
             log('TARGET_DEX ' + JSON.stringify(identified));
           }
@@ -536,6 +551,56 @@ function attachMutationObserver(site, op) {
     return true;
   } catch (e) { log('mutation-observer-error=' + op + ': ' + e); return false; }
 }
+// ART x86_64 backend visitors receive a concrete field HInstruction*.
+ // LocationsBuilder runs after IR optimizations; InstructionCodeGenerator
+ // emits machine instructions for the surviving nodes. This is a
+ // read-only estimate of which field nodes reach the lowering boundary.
+function attachBackendFieldVisitor(compiler, symbol, stage, expectedKind) {
+  const site = getExport(compiler, symbol);
+  if (!site) {
+    log('backend-field-export-not-found stage=' + stage + ' kind=' + expectedKind);
+    return false;
+  }
+  try {
+    Interceptor.attach(site.address, {
+      onEnter(args) {
+        const thread = this.threadId;
+        const active = compiling.get(thread);
+        if (!active) return;
+        const node = args[1].toString();
+        const observedKind = fieldKind(args[1]);
+        if (observedKind !== expectedKind) {
+          log('backend-kind-mismatch expected=' + expectedKind +
+              ' observed=' + observedKind);
+          return;
+        }
+        const state = targetStates.get(thread);
+        if (state) {
+          const key = expectedKind + '@' + node;
+          if (stage === 'locations') state.backendLocations.add(key);
+          else state.backendEmitted.add(key);
+        }
+        backendCounts[stage]++;
+        const ordinal = ++backendVisitOrdinal;
+        if (ordinal > BACKEND_VISIT_LIMIT) return;
+        const event = {type: 'artwatch-backend-field',
+          stage, expectedKind, node, ordinal, thread,
+          method: active.method, compilationKind: active.kind,
+          isFieldTarget: targetMethodPointers.has(active.method)};
+        send(event);
+        log('BACKEND_FIELD ' + JSON.stringify(event));
+      }
+    });
+    send({type:'artwatch-hook-attached',layer:'backend_field_' + stage,
+      kind:expectedKind,source:'export',address:site.address.toString()});
+    log('Attached backend field=' + stage + ' kind=' + expectedKind +
+        ' at=' + site.address);
+    return true;
+  } catch (e) {
+    log('backend-field-hook-error=' + stage + ' ' + expectedKind + ': ' + e);
+    return false;
+  }
+}
 function main() {
   const api = sdkLevel();
   log('pid=' + Process.id + ' arch=' + Process.arch +
@@ -552,6 +617,8 @@ function main() {
                         NAMES.addInstruction, NAMES.replaceWith,
                         NAMES.replaceAndRemove, NAMES.removeInstruction,
                         NAMES.removeInstructionOrPhi, NAMES.lseRun,
+                        NAMES.x64LocationsFieldGet, NAMES.x64LocationsFieldSet,
+                        NAMES.x64EmitFieldGet, NAMES.x64EmitFieldSet,
                         NAMES.lseRunBool, 'jit_load']) {
       try {
         const site = getExport(module, name);
@@ -617,6 +684,12 @@ function main() {
     const addHook = add ? attachFieldNodeCandidate(add, 'basic-block') : false;
     log('ir-insertion-hooks=' + JSON.stringify({append: appendHook, add: addHook}));
     attachFieldAccept(compiler);
+    for (const [stage, kind, symbol] of [
+      ['locations', 'HInstanceFieldGet', NAMES.x64LocationsFieldGet],
+      ['locations', 'HInstanceFieldSet', NAMES.x64LocationsFieldSet],
+      ['emission', 'HInstanceFieldGet', NAMES.x64EmitFieldGet],
+      ['emission', 'HInstanceFieldSet', NAMES.x64EmitFieldSet]
+    ]) attachBackendFieldVisitor(compiler, symbol, stage, kind);
     for (const [op, names] of [
       ['replace', [NAMES.replaceWith]],
       ['replace_remove', [NAMES.replaceAndRemove]],
