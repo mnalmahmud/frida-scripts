@@ -455,3 +455,30 @@ optimization. Nothing mutates ART memory or invokes ART graph APIs.
 
 AOSP implementation reference:
 https://android.googlesource.com/platform/art/+/257ab7fe6885c83f1ab17fe9d4cc4a996ebd3c7e/compiler/optimizing/nodes.cc
+
+## P1.5 exact eliminated field instruction → observed basic block
+
+[Run 44801128480](https://github.com/mnalmahmud/frida-scripts/actions/runs/44801128480)
+passed Android API33 debug/release, API34 debug and static checks. Its
+release logs correlated **401** `Accept` callbacks to the active
+`VisitBasicBlock` frame (127 gets, 274 sets) across **108**
+distinct node/block pairs, with zero mismatched visitor pointers.
+
+The release traces also contain four optimized
+`HInstanceFieldGet*` nodes replaced and removed during LSE. Each of
+these exact instruction pointers appeared in a source-backed
+`VisitBasicBlock` callback with a block previously observed via
+`HGraph::AddBlock`.
+
+This patch joins the historical block identities to the
+`artwatch-field-lifecycle` event using **exact pointer+IR-kind
+identity within one compilation**. It asserts that every
+LSE-eliminated field-get node has a real, previously observed
+basic-block owner and that the corresponding block was seen in
+construction callbacks.
+
+Important caveat: an instruction can move between blocks, so
+`observedBlocks` contains *historical visitation evidence*,
+not an assertion that its final `HInstruction::GetBlock()` equals
+any listed address. Removed node memory is never dereferenced.
+All instrumentation remains read-only.

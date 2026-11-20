@@ -252,6 +252,10 @@ def main():
                            and entry.get('visitedBeforeMutation') is True
                            and entry.get('lowered') is False
                            and entry.get('emitted') is False]
+        block_traced_gets = [(lc, entry) for lc, entry in eliminated_gets
+                             if entry.get('observedBlocks')
+                             and any(v.get('constructed') is True
+                                     for v in entry.get('observedBlocks',[]))]
         baseline_reads = [v for v in summaries
                           if v.get('compilationKind') == 1 and
                           v.get('compilationSucceeded') is True and
@@ -259,12 +263,20 @@ def main():
                               for k in v.get('codeEmittedNodes', []))]
         record('host', f'variant={variant} lifecycle-compilations={len(lifecycles)} '
                f'optimized-removed-gets={len(eliminated_gets)} '
+               f'block-traced-eliminated-gets={len(block_traced_gets)} '
                f'baseline-emitted-gets={len(baseline_reads)}')
         if variant == 'release' and not eliminated_gets:
             raise AssertionError('No exact HInstanceFieldGet visited, replaced and '
                                  'removed during LSE without backend emission')
         if variant == 'release' and not baseline_reads:
             raise AssertionError('No baseline JIT get node observed at code emission')
+        if variant == 'release' and len(block_traced_gets) != len(eliminated_gets):
+            raise AssertionError('LSE-eliminated field get lacked prior '
+                                 'observed HGraph basic-block ownership')
+        for lc, entry in block_traced_gets:
+            if not all(b.get('block') and b.get('visits',0) >= 1
+                       for b in entry['observedBlocks']):
+                raise AssertionError('Malformed historical field block membership')
         if shadow_enabled:
             inits = [v for v in payloads if v.get('type') == 'artwatch-shadow-init']
             if not any(v.get('ready') is True and v.get('buildIdVerified') is True

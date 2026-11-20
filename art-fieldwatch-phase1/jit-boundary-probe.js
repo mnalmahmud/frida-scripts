@@ -254,7 +254,21 @@ function attach(layer, site) {
             }
             const entries = Array.from(lifecycleByNode.values()).map(entry => {
               const identity = entry.kind + '@' + entry.node;
-              return {...entry, lowered: state.backendLocations.has(identity),
+              // Historical evidence from actual ART block visitor
+              // callbacks, joined by exact instruction pointer. A node
+              // can be moved between blocks by optimizer passes; this
+              // does not claim a live GetBlock() after removal.
+              const observedBlocks = [];
+              for (const pair of state.visitorFieldPairs.values()) {
+                if (pair.kind === entry.kind && pair.node === entry.node) {
+                  observedBlocks.push({
+                    block: pair.block, visits: pair.visits,
+                    constructed: pair.constructed
+                  });
+                }
+              }
+              return {...entry, observedBlocks,
+                lowered: state.backendLocations.has(identity),
                 emitted: state.backendEmitted.has(identity)};
             });
             if (entries.length) {
