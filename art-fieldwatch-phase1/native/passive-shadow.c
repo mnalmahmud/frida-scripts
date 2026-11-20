@@ -42,15 +42,18 @@ static int note_build_id(const struct dl_phdr_info *info, char out[41]) {
       if (desc_bytes > length - at) break;
       const uint8_t *desc = notes + at;
       at += desc_bytes;
+      // Android ART may use 16-byte GNU Build IDs (32 hex digits),
+      // rather than the common 20-byte IDs (40 hex digits). The output
+      // buffer holds at most 40 digits plus a NUL terminator.
       if (nh.n_type != NT_GNU_BUILD_ID ||
           nh.n_namesz < 4 || memcmp(name, "GNU", 4) != 0 ||
-          nh.n_descsz != 20) continue;
+          (nh.n_descsz != 16 && nh.n_descsz != 20)) continue;
       static const char digits[] = "0123456789abcdef";
-      for (size_t k = 0; k < 20; ++k) {
+      for (size_t k = 0; k < nh.n_descsz; ++k) {
         out[2*k] = digits[desc[k] >> 4];
         out[2*k+1] = digits[desc[k] & 15];
       }
-      out[40] = '\0';
+      out[2u * nh.n_descsz] = '\0';
       return 1;
     }
   }
