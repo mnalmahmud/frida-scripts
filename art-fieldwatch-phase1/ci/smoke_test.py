@@ -179,6 +179,13 @@ def main():
         if not all(v.get('backendEmitted',0) >=
                    len(v.get('emittedInvokeNodes',[])) for v in invoke_summaries):
             raise AssertionError('Invoke emission sample exceeds observed count')
+        if shadow_enabled and any(v.get('adjacencyRejected',0) > 0
+                                  for v in invoke_summaries):
+            raise AssertionError('Build-ID-gated instruction adjacency probe rejected live nodes')
+        record('host','ART P3 linked get/invoke probes=' +
+               str(sum(v.get('adjacencyProbes',0) for v in invoke_summaries)) +
+               ' adjacent=' +
+               str(sum(v.get('adjacencyMatches',0) for v in invoke_summaries)))
         record('host',f'Invoke x64 backend: code-emission nodes=' +
                str(sum(v.get('backendEmitted',0) for v in invoke_summaries)))
         record('host',f'Existing invoke ABI: samples={len(invoke_samples)} '

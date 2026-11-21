@@ -190,3 +190,17 @@ mutator is built and loaded under the exact build-ID gate; the compiler
 completes with valid SSA and environments; an injected invocation yields
 128 events with the exact expected field-read values; zero-event controls
 remain unchanged; and the P2 256-event oracle still passes.
+
+## P3 get/invoke adjacency check (2026-11-21)
+
+A build-ID-gated **read-only** native function now checks the Android 13
+`HInstruction` link layout for actual, vtable-validated
+`HInstanceFieldGet` and `HInvokeStaticOrDirect` objects seen during the
+same `HGraphVisitor::VisitBasicBlock` visit. It compares reciprocal
+`previous_`/`next_` pointers and exact `HBasicBlock*` identity. Results
+are reported as `adjacencyProbes`, `adjacencyMatches`,
+`adjacencyRejected`, and bounded pointer samples per compilation.
+No ART memory is modified. A passing API33 JIT must not have negative
+identity checks; actual adjacency has to be observed before deploying the
+`CloneUniqueIntReadInGraph` logic. A zero adjacency count is meaningful
+and must not be relabeled as successful injection.

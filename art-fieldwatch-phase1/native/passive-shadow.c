@@ -188,6 +188,49 @@ EXPORT int artwatch_shadow_node(const void *node, const void *vt_symbol, int kin
   }
   return 1;
 }
+// Source-layout experiment: the Itanium x86_64 HInstruction object has
+// vptr, previous_, next_, block_ as its first four machine words in the
+// Android 13 compiler. Match only *already live* vtable-confirmed nodes
+// passed by Frida Accept observers, after the exact mapped-ELF gate.
+// On any mismatch, fail closed. This function NEVER mutates ART memory.
+// Return 1 for adjacent get->invoke with reciprocal links and block;
+// 0 for nonadjacency; -1 for invalid gate / object identity.
+EXPORT int artwatch_shadow_linked_get_invoke(
+    const void *getter, const void *invoke,
+    const void *get_vtable, const void *invoke_vtable) {
+  if (ready != 1 || !aligned(getter) || !aligned(invoke) ||
+      !aligned(get_vtable) || !aligned(invoke_vtable)) return -1;
+  // Confirm that the public vtable symbols belong to the mapped compiler.
+  const char *symbol_names[2] = {
+    "_ZTVN3art17HInstanceFieldGetE",
+    "_ZTVN3art21HInvokeStaticOrDirectE"
+  };
+  const void *vt[2] = {get_vtable, invoke_vtable};
+  const void *objects[2] = {getter, invoke};
+  for (size_t i = 0; i < 2; ++i) {
+    Dl_info info = {0};
+    if (!dladdr(vt[i], &info) ||
+        !named(info.dli_fname, "libart-compiler.so") ||
+        info.dli_sname == NULL ||
+        strcmp(info.dli_sname, symbol_names[i]) != 0 ||
+        info.dli_saddr != vt[i]) return -1;
+    void *actual = NULL;
+    memcpy(&actual, objects[i], sizeof(actual));
+    if (actual != (const uint8_t *)vt[i] + 2 * sizeof(void*)) return -1;
+  }
+  // First four pointers are vptr, previous_, next_, HBasicBlock*.
+  // Read only known, live, already-vtable-confirmed instruction objects.
+  const uint8_t *g = (const uint8_t *)getter;
+  const uint8_t *i = (const uint8_t *)invoke;
+  const void *g_next = NULL, *i_prev = NULL;
+  const void *g_block = NULL, *i_block = NULL;
+  memcpy(&g_next, g + 2 * sizeof(void*), sizeof(g_next));
+  memcpy(&i_prev, i + 1 * sizeof(void*), sizeof(i_prev));
+  memcpy(&g_block, g + 3 * sizeof(void*), sizeof(g_block));
+  memcpy(&i_block, i + 3 * sizeof(void*), sizeof(i_block));
+  return g_next == invoke && i_prev == getter &&
+         g_block != NULL && i_block == g_block ? 1 : 0;
+}
 // Writes only into the caller's scratch buffer, never to ART memory.
 EXPORT int artwatch_shadow_report(char *out, uint32_t length) {
   if (out == NULL || length < 96) return 0;

@@ -173,7 +173,9 @@ function loadPassiveShadow() {
       report: exported('artwatch_shadow_report','int',['pointer','uint']),
       scopeBegin: exported('artwatch_shadow_scope_begin','int',['pointer']),
       scopeEnd: exported('artwatch_shadow_scope_end','int',['pointer','uint']),
-      block: exported('artwatch_shadow_block','int',['pointer','pointer','pointer'])
+      block: exported('artwatch_shadow_block','int',['pointer','pointer','pointer']),
+      linkedGetInvoke: exported('artwatch_shadow_linked_get_invoke','int',
+        ['pointer','pointer','pointer','pointer'])
     };
     send({type:'artwatch-shadow-init',ready:true,source:'native',
       buildIdVerified:true,mutable:false});
@@ -239,6 +241,8 @@ function attach(layer, site) {
             existingInvokeBlockVisits: 0,
             existingInvokeLocations: new Set(),
             existingInvokeEmitted: new Set(),
+            adjacencyProbes: 0, adjacencyMatches: 0,
+            adjacencyRejected: 0, adjacencySamples: [],
             seenVisits: new Set(), seenKinds: new Set(), uniqueNodes: new Set(),
             visitsByPhase: {}, mutations: [], reported: 0,
             optimizationEntries: 0, lseInvocations: 0,
@@ -273,6 +277,10 @@ function attach(layer, site) {
               blockCorrelated:state.existingInvokeBlockVisits,
               backendLocations:state.existingInvokeLocations.size,
               backendEmitted:state.existingInvokeEmitted.size,
+              adjacencyProbes:state.adjacencyProbes,
+              adjacencyMatches:state.adjacencyMatches,
+              adjacencyRejected:state.adjacencyRejected,
+              adjacencySamples:state.adjacencySamples,
               emittedInvokeNodes:[...state.existingInvokeEmitted].slice(0,12),
               compilationSucceeded:ret.toInt32() !== 0});
           }
@@ -596,7 +604,7 @@ function attachBlockBoundary(layer, site) {
             this.visitorBlockRecord = {
               visitor: args[0].toString(), block: block.toString(),
               callOrdinal: ++state.blockVisitOrdinal,
-              fieldCount: 0, fields: []
+              fieldCount: 0, fields: [], lastGet: null
             };
             activeVisitorBlockByThread.set(thread,this.visitorBlockRecord);
             if (state.visitorBlocks.size < 4096)
@@ -855,6 +863,8 @@ function attachFieldAccept(compiler) {
               const isGet = /FieldGet$/.test(kind);
               const isSet = /FieldSet$/.test(kind);
               if (isGet || isSet) {
+                if (kind === 'HInstanceFieldGet')
+                  currentBlock.lastGet = args[0];
                 // Captures only relative order of *field* instructions
                 // encountered by one real VisitBasicBlock traversal.
                 // Other IR instructions and phi nodes are omitted.
@@ -1058,6 +1068,7 @@ function attachExistingInvokeObserver(compiler) {
     vtableExported:vt !== null,writesArtMemory:false});
   if (!site || !vt) return false;
   const expected = vt.address.add(2 * Process.pointerSize);
+  const getVtable = getExport(compiler, '_ZTVN3art17HInstanceFieldGetE');
   try {
     Interceptor.attach(site.address, {
       onEnter(args) {
@@ -1070,6 +1081,25 @@ function attachExistingInvokeObserver(compiler) {
         const scope = activeVisitorBlockByThread.get(thread);
         const matchesBlock = !!scope && scope.visitor === args[1].toString();
         const state = targetStates.get(thread);
+        // Exact-ELF-gated, source-layout test. Do not retain HInstruction*
+        // past this live invocation. An Accept() callback alone cannot
+        // establish linked-list adjacency or matching HBasicBlock*.
+        if (state && matchesBlock && scope.lastGet && getVtable &&
+            shadowShim && shadowShim.linkedGetInvoke &&
+            state.adjacencyProbes < 256) {
+          state.adjacencyProbes++;
+          const rc = shadowShim.linkedGetInvoke(
+            scope.lastGet, args[0], getVtable.address, vt.address);
+          if (rc === 1) {
+            state.adjacencyMatches++;
+            if (state.adjacencySamples.length < 12)
+              state.adjacencySamples.push({
+                get:scope.lastGet.toString(),invoke:args[0].toString(),
+                block:scope.block});
+          } else if (rc < 0) {
+            state.adjacencyRejected++;
+          }
+        }
         if (state) {
           state.existingInvokeVisits++;
           if (state.existingInvokeNodes.size < 4096)
