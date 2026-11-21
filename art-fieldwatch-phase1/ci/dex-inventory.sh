@@ -50,12 +50,25 @@ if "$analyzer" dex code --class com.example.artfieldwatch.FieldIRTarget "$apk" >
       exit 1
     fi
     echo "Verified P3 canary has real field instructions without an explicit event sink."
+    # The template carrier must retain a genuine resolved native invoke
+    # alongside both field operations in the same DEX method.
+    awk '/^\.method.* p3TemplateCarrierOn\(/ { inside=1; next }
+         inside && /^\.end method/ { exit }
+         inside { print }' "$out/fieldir-$variant.smali" > "$out/fieldir-release-p3TemplateCarrierOn.smali"
+    if ! grep -q 'iput' "$out/fieldir-release-p3TemplateCarrierOn.smali" ||
+       ! grep -q 'iget' "$out/fieldir-release-p3TemplateCarrierOn.smali" ||
+       ! grep -q 'FieldEventSink;->recordInt(III)V' "$out/fieldir-release-p3TemplateCarrierOn.smali"; then
+      echo "::error::P3 template must retain iput, iget and a real recordInt invoke"
+      cat "$out/fieldir-release-p3TemplateCarrierOn.smali"
+      exit 1
+    fi
+    echo "Verified P3 template DEX contains field operations and recordInt invoke."
     # Separate loop fixtures should also preserve actual field reads in DEX.
     # Otherwise JIT cannot be credited with eliminating them.
     for method in exerciseOverwrites exerciseAlternating; do
       awk -v method="$method" '
         $0 ~ "^\\.method.* " method "\\(I\\)I" { inside=1; next }
-        inside && /^\\.end method/ { exit }
+        inside && /^\.end method/ { exit }
         inside { print }
       ' "$out/fieldir-$variant.smali" > "$out/fieldir-release-$method.smali"
       if ! grep -q 'iput' "$out/fieldir-release-$method.smali" ||
