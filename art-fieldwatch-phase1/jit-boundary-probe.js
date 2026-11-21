@@ -289,6 +289,7 @@ function attach(layer, site) {
               adjacencyBrokenLinks:state.adjacencyBrokenLinks,
               adjacencyNoGetWithin8:state.adjacencyNoGetWithin8,
               adjacencyPreviousSamples:state.adjacencyPreviousSamples,
+              fieldTarget:targetMethodPointers.has(this.method),
               emittedInvokeNodes:[...state.existingInvokeEmitted].slice(0,12),
               compilationSucceeded:ret.toInt32() !== 0});
           }
@@ -596,7 +597,11 @@ function attachBlockBoundary(layer, site) {
           if (state.constructedBlocks.size < 4096)
             state.constructedBlocks.add(block.toString());
         } else {
-          if (!optimizationByThread.has(thread)) return;
+          // HGraphVisitor::VisitBasicBlock executes during baseline too.
+          // The previous RunOptimizations-only gate excluded all five
+          // field-target methods in the API33 debug trace.
+          if (layer === 'graph_checker_block' &&
+              !optimizationByThread.has(thread)) return;
           const block = args[1];
           if (block.isNull() || !Process.findRangeByAddress(block)) return;
           if (layer === 'graph_checker_block') {
