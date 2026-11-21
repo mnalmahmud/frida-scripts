@@ -36,6 +36,20 @@ if "$analyzer" dex code --class com.example.artfieldwatch.FieldIRTarget "$apk" >
       exit 1
     fi
     echo "Verified release testViaIdentity DEX retains both iput and iget."
+    awk '/^\\.method.* p3CanaryOn\\(/ { inside=1; next }
+         inside && /^\\.end method/ { exit }
+         inside { print }' "$out/fieldir-$variant.smali" > "$out/fieldir-release-p3CanaryOn.smali"
+    if ! grep -q 'iput' "$out/fieldir-release-p3CanaryOn.smali" ||
+       ! grep -q 'iget' "$out/fieldir-release-p3CanaryOn.smali"; then
+      echo "::error::P3 canary missing iput or iget in release DEX"
+      cat "$out/fieldir-release-p3CanaryOn.smali"
+      exit 1
+    fi
+    if grep -q 'FieldEventSink' "$out/fieldir-release-p3CanaryOn.smali"; then
+      echo "::error::P3 canary must not call the native event sink"
+      exit 1
+    fi
+    echo "Verified P3 canary has real field instructions without an explicit event sink."
     # Separate loop fixtures should also preserve actual field reads in DEX.
     # Otherwise JIT cannot be credited with eliminating them.
     for method in exerciseOverwrites exerciseAlternating; do
