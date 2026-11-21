@@ -182,10 +182,23 @@ def main():
         if shadow_enabled and any(v.get('adjacencyRejected',0) > 0
                                   for v in invoke_summaries):
             raise AssertionError('Build-ID-gated instruction adjacency probe rejected live nodes')
-        record('host','ART P3 linked get/invoke probes=' +
-               str(sum(v.get('adjacencyProbes',0) for v in invoke_summaries)) +
-               ' adjacent=' +
-               str(sum(v.get('adjacencyMatches',0) for v in invoke_summaries)))
+        probe_count = sum(v.get('adjacencyProbes',0) for v in invoke_summaries)
+        direct_count = sum(v.get('adjacencyMatches',0) for v in invoke_summaries)
+        nearby_count = sum(v.get('adjacencyWithin8',0) for v in invoke_summaries)
+        mismatched = sum(v.get('adjacencyBlockMismatch',0) for v in invoke_summaries)
+        broken = sum(v.get('adjacencyBrokenLinks',0) for v in invoke_summaries)
+        no_get = sum(v.get('adjacencyNoGetWithin8',0) for v in invoke_summaries)
+        rejected = sum(v.get('adjacencyRejected',0) for v in invoke_summaries)
+        record('host',f'ART P3 invoke predecessors: probes={probe_count} '
+               f'direct={direct_count} within8={nearby_count} '
+               f'blockMismatch={mismatched} brokenLinks={broken} '
+               f'noGetWithin8={no_get} rejected={rejected}')
+        if shadow_enabled:
+            if probe_count == 0:
+                raise AssertionError('P3 invoke predecessor observer never ran')
+            if probe_count != (direct_count + nearby_count + mismatched +
+                               broken + no_get + rejected):
+                raise AssertionError('P3 invoke predecessor tallies inconsistent')
         record('host',f'Invoke x64 backend: code-emission nodes=' +
                str(sum(v.get('backendEmitted',0) for v in invoke_summaries)))
         record('host',f'Existing invoke ABI: samples={len(invoke_samples)} '
