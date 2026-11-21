@@ -231,6 +231,31 @@ EXPORT int artwatch_shadow_linked_get_invoke(
   return g_next == invoke && i_prev == getter &&
          g_block != NULL && i_block == g_block ? 1 : 0;
 }
+// Exact-ELF-gated Android 13 x86_64 HInstruction layout:
+// vptr, previous_, next_, block_, dex_pc_. Read DEX PC only from a live
+// vtable-verified node while the compiler visitor is executing.
+// A return value of 0 means no output was written. Never retain the node.
+EXPORT int artwatch_shadow_instruction_dex_pc(
+    const void *node, const void *vt_symbol, uint32_t *out_dex_pc) {
+  if (ready != 1 || !aligned(node) || !aligned(vt_symbol) ||
+      out_dex_pc == NULL) return 0;
+  Dl_info info = {0};
+  if (!dladdr(vt_symbol, &info) ||
+      !named(info.dli_fname, "libart-compiler.so") ||
+      info.dli_sname == NULL || info.dli_saddr != vt_symbol) return 0;
+  if (strcmp(info.dli_sname, "_ZTVN3art17HInstanceFieldGetE") != 0 &&
+      strcmp(info.dli_sname, "_ZTVN3art21HInvokeStaticOrDirectE") != 0)
+    return 0;
+  const void *actual_vptr = NULL;
+  memcpy(&actual_vptr, node, sizeof(actual_vptr));
+  if (actual_vptr != (const uint8_t *)vt_symbol + 2*sizeof(void*))
+    return 0;
+  uint32_t dex_pc = UINT32_MAX;
+  memcpy(&dex_pc, (const uint8_t *)node + 4*sizeof(void*), sizeof(dex_pc));
+  if (dex_pc == UINT32_MAX) return 0;
+  *out_dex_pc = dex_pc;
+  return 1;
+}
 // Writes only into the caller's scratch buffer, never to ART memory.
 EXPORT int artwatch_shadow_report(char *out, uint32_t length) {
   if (out == NULL || length < 96) return 0;
