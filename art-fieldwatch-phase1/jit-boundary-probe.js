@@ -20,6 +20,39 @@ const optimizationByThread = new Map();
 // Scoped to an actual out-of-line HGraphVisitor::VisitBasicBlock call.
 const activeVisitorBlockByThread = new Map();
 const knownFieldVtables = new Map();
+// Read-only SSA producer classification from actual exported primary vtables.
+// A missing symbol produces an explicit unknown kind; no ART methods are called.
+const knownValueVtables = new Map();
+const SSA_VALUE_KINDS = [
+  'HParameterValue', 'HIntConstant', 'HLongConstant', 'HNullConstant',
+  'HFloatConstant', 'HDoubleConstant', 'HPhi', 'HAdd', 'HSub',
+  'HSelect', 'HNullCheck', 'HBoundsCheck', 'HLoadClass',
+  'HInvokeStaticOrDirect', 'HInvokeVirtual', 'HNewInstance',
+  'HInstanceFieldGet', 'HStaticFieldGet', 'HArrayGet',
+  'HTypeConversion', 'HAnd', 'HOr', 'HNeg', 'HNot', 'HReturn'
+];
+const MAX_FIELD_PASSES = 20;
+const MAX_FIELDS_PER_PASS = 20;
+function discoverValueVtables(compiler) {
+  const available = [];
+  for (const kind of SSA_VALUE_KINDS) {
+    const symbol = '_ZTVN3art' + kind.length + kind + 'E';
+    const site = getExport(compiler, symbol);
+    if (!site) continue;
+    knownValueVtables.set(site.address.add(2 * Process.pointerSize).toString(),kind);
+    available.push(kind);
+  }
+  log('ssa-value-vtables=' + available.join(','));
+  send({type:'artwatch-ssa-vtables',available});
+}
+function classifySSAValue(value) {
+  if (!value || value.isNull()) return null;
+  try {
+    const range = Process.findRangeByAddress(value);
+    if (!range || !range.protection.includes('r')) return null;
+    return knownValueVtables.get(value.readPointer().toString()) || null;
+  } catch (_) { return null; }
+}
 let shadowShim = null;
 let shadowModuleAttempted = false;
 let shadowGraphLogged = 0;
@@ -203,6 +236,8 @@ function attach(layer, site) {
             visitorFieldNodes: new Map(), visitorFieldPairs: new Map(),
             visitorFieldVisits: 0, visitorFieldGetVisits: 0,
             visitorFieldSetVisits: 0, visitorPointerMismatch: 0,
+            blockVisitOrdinal: 0, fieldPassesObserved: 0,
+            fieldVisitOrderSamples: [], fieldOrderTruncated: 0,
             blockInstructionMap: new Map(), fieldNodeInserts: 0,
             graphAddInstructionCalls: 0, fieldVisitBlockMatches: 0,
             unmatchedBlockCalls: 0
@@ -250,7 +285,10 @@ function attach(layer, site) {
               }
               entry.operations.push(mutation.op);
               entry.visitedBeforeMutation ||= mutation.visitedBeforeMutation === true;
-              if (mutation.op === 'replace') entry.replacement = mutation.substitute;
+              if (mutation.op === 'replace') {
+                entry.replacement = mutation.substitute;
+                entry.replacementKind = mutation.substituteKind;
+              }
             }
             const entries = Array.from(lifecycleByNode.values()).map(entry => {
               const identity = entry.kind + '@' + entry.node;
@@ -404,6 +442,18 @@ function attachGraphBoundary(layer, site) {
         if (layer === 'pre_opt') {
           const state = targetStates.get(this.nativeThread);
           if (state && state.visitorBlocks.size > 0) {
+            const orderEvent = {type:'artwatch-field-visit-order',
+              method:this.method,compilationKind:this.kind,
+              thread:this.nativeThread,graph:this.graph,
+              visitedBlockCalls:state.blockVisitOrdinal,
+              passesWithFields:state.fieldPassesObserved,
+              passesCaptured:state.fieldVisitOrderSamples.length,
+              truncatedFieldEntries:state.fieldOrderTruncated,
+              passes:state.fieldVisitOrderSamples};
+            send(orderEvent);
+            if (this.ordinal <= SAMPLE_LIMIT)
+              log('FIELD_VISIT_ORDER ' + JSON.stringify({
+                ...orderEvent,passes:orderEvent.passes.slice(0,3)}));
             const fieldExamples = [...state.visitorFieldPairs.values()].slice(0,24);
             const blockFieldEvent = {type:'artwatch-field-block-ownership',
               method:this.method,compilationKind:this.kind,
@@ -519,9 +569,12 @@ function attachBlockBoundary(layer, site) {
             this.visitorBlockThread = thread;
             this.previousVisitorBlock = activeVisitorBlockByThread.get(thread);
             this.visitorBlockActive = true;
-            activeVisitorBlockByThread.set(thread, {
-              visitor: args[0].toString(), block: block.toString()
-            });
+            this.visitorBlockRecord = {
+              visitor: args[0].toString(), block: block.toString(),
+              callOrdinal: ++state.blockVisitOrdinal,
+              fieldCount: 0, fields: []
+            };
+            activeVisitorBlockByThread.set(thread,this.visitorBlockRecord);
             if (state.visitorBlocks.size < 4096)
               state.visitorBlocks.add(block.toString());
             // Inlining or loop transformations can add blocks after the
@@ -534,6 +587,19 @@ function attachBlockBoundary(layer, site) {
       },
       onLeave() {
         if (this.visitorBlockActive !== true) return;
+        const state = targetStates.get(this.visitorBlockThread);
+        const sample = this.visitorBlockRecord;
+        if (state && sample && sample.fieldCount > 0) {
+          state.fieldPassesObserved++;
+          if (state.fieldVisitOrderSamples.length < MAX_FIELD_PASSES) {
+            state.fieldVisitOrderSamples.push({
+              block:sample.block, visitor:sample.visitor,
+              callOrdinal:sample.callOrdinal,
+              fieldCount:sample.fieldCount,fields:sample.fields,
+              constructed:state.constructedBlocks.has(sample.block)
+            });
+          }
+        }
         if (this.previousVisitorBlock === undefined)
           activeVisitorBlockByThread.delete(this.visitorBlockThread);
         else
@@ -765,6 +831,15 @@ function attachFieldAccept(compiler) {
               const isGet = /FieldGet$/.test(kind);
               const isSet = /FieldSet$/.test(kind);
               if (isGet || isSet) {
+                // Captures only relative order of *field* instructions
+                // encountered by one real VisitBasicBlock traversal.
+                // Other IR instructions and phi nodes are omitted.
+                const position = currentBlock.fieldCount++;
+                if (currentBlock.fields.length < MAX_FIELDS_PER_PASS) {
+                  currentBlock.fields.push({kind,node,ordinal:position});
+                } else {
+                  blockState.fieldOrderTruncated++;
+                }
                 const id = kind + '@' + node;
                 const pairId = id + '|block=' + currentBlock.block;
                 blockState.visitorFieldVisits++;
@@ -859,9 +934,11 @@ function attachMutationObserver(site, op) {
         const instruction = op === 'replace' ? args[0] : args[1];
         const kind = fieldKind(instruction);
         if (!kind) return;
+        const replacement = op === 'replace' ? args[1] :
+          (op === 'replace_remove' ? args[2] : null);
         const record = {op, kind, node: instruction.toString(),
-          substitute: op === 'replace' ? args[1].toString() :
-            (op === 'replace_remove' ? args[2].toString() : null),
+          substitute: replacement === null ? null : replacement.toString(),
+          substituteKind: replacement === null ? null : classifySSAValue(replacement),
           duringLse: lseByThread.has(thread),
           duringOptimizations: optimizationByThread.has(thread),
           visitedBeforeMutation: targetMethodPointers.has(compilation.method)
@@ -1047,6 +1124,7 @@ function main() {
           (site ? site.address : 'not-exported'));
     }
     discoverFieldVtables(compiler);
+    discoverValueVtables(compiler);
     // The app's onCreate() has not run at agent load time. Resolve the
     // already-loaded shim lazily from compiler callbacks instead.
     loadPassiveShadow();

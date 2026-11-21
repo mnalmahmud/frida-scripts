@@ -277,6 +277,37 @@ def main():
             if not all(b.get('block') and b.get('visits',0) >= 1
                        for b in entry['observedBlocks']):
                 raise AssertionError('Malformed historical field block membership')
+        producer_types = sorted({e.get('replacementKind') for _,e in eliminated_gets
+                                 if e.get('replacementKind')})
+        record('host',f'Replaced instance-field SSA producer kinds={producer_types}')
+        visit_order = [v for v in payloads
+                       if v.get('type') == 'artwatch-field-visit-order']
+        sampled_passes = [item for event in visit_order
+                          for item in event.get('passes',[])]
+        order_field_count = sum(p.get('fieldCount',0) for p in sampled_passes)
+        order_truncated = sum(v.get('truncatedFieldEntries',0)
+                              for v in visit_order)
+        record('host',f'Field visit order scopes={len(visit_order)} '
+               f'passes={len(sampled_passes)} fields={order_field_count} '
+               f'truncated={order_truncated}')
+        if not sampled_passes or order_field_count <= 0:
+            raise AssertionError('No field visitation order from real ART blocks')
+        for event in visit_order:
+            if event.get('passesCaptured') != len(event.get('passes',[])):
+                raise AssertionError('Incorrect captured visitor pass count')
+            if event.get('passesWithFields',0) < event.get('passesCaptured',0):
+                raise AssertionError('Captured more field passes than observed')
+        for item in sampled_passes:
+            fields = item.get('fields',[])
+            if not item.get('block') or not item.get('visitor'):
+                raise AssertionError('Missing visitor/block pointer in visit order')
+            if item.get('fieldCount',0) < len(fields) or len(fields) > 20:
+                raise AssertionError('Field visitor sample overflow')
+            if [i.get('ordinal') for i in fields] != list(range(len(fields))):
+                raise AssertionError('Field visitor ordering ordinals are inconsistent')
+            if not all(i.get('node') and str(i.get('kind','')).startswith('H')
+                       for i in fields):
+                raise AssertionError('Missing typed node from visit order')
         if shadow_enabled:
             inits = [v for v in payloads if v.get('type') == 'artwatch-shadow-init']
             if not any(v.get('ready') is True and v.get('buildIdVerified') is True

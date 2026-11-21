@@ -482,3 +482,38 @@ Important caveat: an instruction can move between blocks, so
 not an assertion that its final `HInstruction::GetBlock()` equals
 any listed address. Removed node memory is never dereferenced.
 All instrumentation remains read-only.
+
+## P1.6 read-only field sequence and LSE replacement producer evidence
+
+Run [44802096790](https://github.com/mnalmahmud/frida-scripts/actions/runs/44802096790)
+passed all required CI jobs, confirming historical block ownership for
+every tested optimized LSE-eliminated field read.
+
+AOSP `HGraphVisitor::VisitBasicBlock` iterates instructions and calls
+`Accept(this)`. This experiment records a **bounded per-invocation
+sequence of field-node visits** (visitor address, block address, exact
+instruction pointer, field IR kind, and relative field-only ordinal).
+The map is restored on `VisitBasicBlock` return, even for nested
+calls. It does not claim a complete block instruction listing: phis
+and non-field instructions are intentionally omitted, and optimizations
+may move an instruction between visits.
+
+The experiment also examines LSE `HInstruction::ReplaceWith` calls.
+At method entry, both old field node and live replacement SSA
+`HInstruction*` are known. For replacements only, the agent matches
+the replacement's primary vptr against **explicitly exported,
+name-and-address-validated** ART instruction vtables, without calling
+virtual functions or interpreting object fields. The IR lifecycle
+record exposes the replacement pointer and `replacementKind`
+when recognized; otherwise it reports a null kind instead of guessing.
+
+CI requires nonempty, internally consistent field-visit sequences;
+SSA producer classification is diagnostic initially because the
+compiler may use an instruction kind without a suitable exported
+primary vtable. This remains compiler-time, read-only research:
+neither Java field values nor actual field-access runtime events are
+emitted. These observations define the next ABI verification needed
+for a correctly typed, side-effecting event sink.
+
+AOSP reference (structural, not a binary ABI contract):
+https://android.googlesource.com/platform/art/+/refs/heads/android13-release/compiler/optimizing/nodes.h
