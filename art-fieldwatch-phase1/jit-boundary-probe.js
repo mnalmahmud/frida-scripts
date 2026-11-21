@@ -60,6 +60,10 @@ let shadowNodeLogged = 0;
 // Real compiler-built invoke nodes are our ABI oracle; no mutation here.
 const INVOKE_ACCEPT = '_ZN3art21HInvokeStaticOrDirect6AcceptEPNS_13HGraphVisitorE';
 const INVOKE_VTABLE = '_ZTVN3art21HInvokeStaticOrDirectE';
+const INVOKE_BACKEND_LOCATIONS =
+  '_ZN3art6x86_6422LocationsBuilderX86_6425VisitInvokeStaticOrDirectEPNS_21HInvokeStaticOrDirectE';
+const INVOKE_BACKEND_EMISSION =
+  '_ZN3art6x86_6430InstructionCodeGeneratorX86_6425VisitInvokeStaticOrDirectEPNS_21HInvokeStaticOrDirectE';
 const MAX_EXISTING_INVOKES = 80;
 let existingInvokeCount = 0;
 const targetDexByMethod = new Map();
@@ -233,6 +237,8 @@ function attach(layer, site) {
             method: this.method, kind: this.compilationKind,
             existingInvokeVisits: 0, existingInvokeNodes: new Set(),
             existingInvokeBlockVisits: 0,
+            existingInvokeLocations: new Set(),
+            existingInvokeEmitted: new Set(),
             seenVisits: new Set(), seenKinds: new Set(), uniqueNodes: new Set(),
             visitsByPhase: {}, mutations: [], reported: 0,
             optimizationEntries: 0, lseInvocations: 0,
@@ -265,6 +271,9 @@ function attach(layer, site) {
               visits:state.existingInvokeVisits,
               uniqueNodes:state.existingInvokeNodes.size,
               blockCorrelated:state.existingInvokeBlockVisits,
+              backendLocations:state.existingInvokeLocations.size,
+              backendEmitted:state.existingInvokeEmitted.size,
+              emittedInvokeNodes:[...state.existingInvokeEmitted].slice(0,12),
               compilationSucceeded:ret.toInt32() !== 0});
           }
           if (state && targetMethodPointers.has(this.method)) {
@@ -1083,6 +1092,40 @@ function attachExistingInvokeObserver(compiler) {
     return false;
   }
 }
+// Verify stock ART's real x86_64 invoke backend on the same node identity.
+// Both callbacks are read-only. A successful compilation with an emitted
+// invoke establishes codegen reachability, not field-event insertion.
+function attachExistingInvokeBackend(compiler, symbol, stage) {
+  const site = getExport(compiler,symbol);
+  const vt = getExport(compiler,INVOKE_VTABLE);
+  if (!site || !vt) {
+    send({type:'artwatch-invoke-backend-availability',stage,available:false});
+    return false;
+  }
+  const expected = vt.address.add(2 * Process.pointerSize);
+  try {
+    Interceptor.attach(site.address,{
+      onEnter(args) {
+        const thread=this.threadId;
+        const active=compiling.get(thread);
+        const state=targetStates.get(thread);
+        if (!active || !state) return;
+        const node=args[1];
+        try { if (!node.readPointer().equals(expected)) return; }
+        catch (_) { return; }
+        const key=node.toString();
+        if (stage==='locations') state.existingInvokeLocations.add(key);
+        else state.existingInvokeEmitted.add(key);
+      }
+    });
+    send({type:'artwatch-hook-attached',layer:'existing_invoke_'+stage,
+      source:'export',address:site.address.toString()});
+    return true;
+  } catch(e) {
+    log('existing-invoke-backend-attach-error='+stage+' '+e);
+    return false;
+  }
+}
 function main() {
   const api = sdkLevel();
   log('pid=' + Process.id + ' arch=' + Process.arch +
@@ -1182,6 +1225,8 @@ function main() {
     discoverFieldVtables(compiler);
     discoverValueVtables(compiler);
     attachExistingInvokeObserver(compiler);
+    attachExistingInvokeBackend(compiler,INVOKE_BACKEND_LOCATIONS,'locations');
+    attachExistingInvokeBackend(compiler,INVOKE_BACKEND_EMISSION,'emission');
     // The app's onCreate() has not run at agent load time. Resolve the
     // already-loaded shim lazily from compiler callbacks instead.
     loadPassiveShadow();
