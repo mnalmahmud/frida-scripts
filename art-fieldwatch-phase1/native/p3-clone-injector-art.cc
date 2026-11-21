@@ -105,5 +105,55 @@ CloneResult CloneIntReadFromResolvedTemplate(
   return CloneResult::kInserted;
 }
 
+// Select the template by *exact* DEX identities within the compiler's
+// current graph, never by a global ArtMethod pointer or a stale node address.
+// The caller obtains these IDs from the currently compiled APK and resolves
+// expected_sink_method using ART's normal class/method resolution.
+CloneResult CloneUniqueIntReadInGraph(
+    HGraph* graph,
+    const DexFile* expected_dex,
+    uint32_t expected_compiled_method_idx,
+    uint32_t expected_field_idx,
+    uint32_t expected_get_dex_pc,
+    uint32_t expected_sink_method_idx,
+    ArtMethod* expected_sink_method,
+    int32_t read_site) {
+  if (graph == nullptr || expected_dex == nullptr ||
+      expected_sink_method == nullptr) {
+    return CloneResult::kMissing;
+  }
+  // A DEX method index is not globally unique across class loaders.
+  if (&graph->GetDexFile() != expected_dex ||
+      graph->GetMethodIdx() != expected_compiled_method_idx ||
+      !graph->IsInSsaForm()) {
+    return CloneResult::kGraphMismatch;
+  }
+  HInstanceFieldGet* selected_get = nullptr;
+  HInvokeStaticOrDirect* selected_invoke = nullptr;
+  for (HBasicBlock* block : graph->GetActiveBlocks()) {
+    for (HInstruction* inst = block->GetFirstInstruction();
+         inst != nullptr; inst = inst->GetNext()) {
+      if (!inst->IsInvokeStaticOrDirect()) continue;
+      HInvokeStaticOrDirect* invoke = inst->AsInvokeStaticOrDirect();
+      const MethodReference reference = invoke->GetMethodReference();
+      if (reference.dex_file != expected_dex ||
+          reference.index != expected_sink_method_idx ||
+          invoke->GetResolvedMethod() != expected_sink_method) continue;
+      HInstruction* previous = inst->GetPrevious();
+      if (previous == nullptr || !previous->IsInstanceFieldGet()) continue;
+      HInstanceFieldGet* get = previous->AsInstanceFieldGet();
+      if (get->GetFieldInfo().GetFieldIndex() != expected_field_idx ||
+          get->GetDexPc() != expected_get_dex_pc ||
+          &get->GetFieldInfo().GetDexFile() != expected_dex) continue;
+      if (selected_invoke != nullptr) return CloneResult::kTemplateMismatch;
+      selected_get = get;
+      selected_invoke = invoke;
+    }
+  }
+  if (selected_invoke == nullptr) return CloneResult::kMissing;
+  return CloneIntReadFromResolvedTemplate(
+      graph, selected_get, selected_invoke, expected_sink_method, read_site);
+}
+
 }  // namespace artwatch_p3
 }  // namespace art
