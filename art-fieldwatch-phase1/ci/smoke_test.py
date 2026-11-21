@@ -137,6 +137,31 @@ def main():
                     payloads.append(m['payload'])
             except (ValueError, TypeError):
                 continue
+        # Source-backed ABI oracle: compiler-created HInvokeStaticOrDirect
+        # nodes must be observed, not merely a successfully hooked export.
+        # This remains passive and does not imply an injected invoke.
+        invoke_abi = [v for v in payloads
+                      if v.get('type') == 'artwatch-existing-invoke-abi']
+        invoke_samples = [v for v in payloads
+                          if v.get('type') == 'artwatch-existing-invoke']
+        invoke_summaries = [v for v in payloads
+                            if v.get('type') == 'artwatch-existing-invoke-summary']
+        if not any(v.get('acceptExported') is True and
+                   v.get('vtableExported') is True and
+                   v.get('writesArtMemory') is False for v in invoke_abi):
+            raise AssertionError('API 33 compiler invoke ABI exports not verified')
+        if not invoke_samples or not invoke_summaries:
+            raise AssertionError('No real compiler-created invoke-node observations')
+        if not any(v.get('compilationSucceeded') is True and
+                   v.get('visits', 0) >= v.get('uniqueNodes', 0) > 0
+                   for v in invoke_summaries):
+            raise AssertionError('No successful compilation containing invoke IR')
+        if not all(v.get('blockCorrelated', 0) <= v.get('visits', 0)
+                   for v in invoke_summaries):
+            raise AssertionError('Invalid invoke visitor/block correlation count')
+        record('host',f'Existing invoke ABI: samples={len(invoke_samples)} '
+               f'compilations={len(invoke_summaries)} '
+               f'correlated={sum(v.get("blockCorrelated",0) for v in invoke_summaries)}')
         graph_hooks = {v.get('layer') for v in payloads
                        if v.get('type') == 'artwatch-hook-attached'
                        and v.get('layer') in ('graph_builder','pre_opt')}
