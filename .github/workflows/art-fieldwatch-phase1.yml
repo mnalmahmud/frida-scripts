@@ -10,6 +10,11 @@ on:
         default: false
 permissions:
   contents: read
+# Older PR test matrices were overlapping on hosted runners, repeatedly
+# getting Maven Central HTTP 429. Only the newest run is authoritative.
+concurrency:
+  group: art-fieldwatch-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 jobs:
   static:
     runs-on: ubuntu-latest
@@ -25,6 +30,9 @@ jobs:
     timeout-minutes: 35
     strategy:
       fail-fast: false
+      # Avoid three fresh Gradle/AGP dependency resolutions sharing the
+      # runner egress/IP at once, which triggers Maven Central HTTP 429.
+      max-parallel: 1
       matrix:
         include:
           - api: 33
