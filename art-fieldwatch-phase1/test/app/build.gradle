@@ -1,0 +1,36 @@
+plugins {
+ id 'com.android.application'
+}
+android {
+ namespace 'com.example.artfieldwatch'
+ compileSdk 35
+ defaultConfig {
+  applicationId 'com.example.artfieldwatch'
+  minSdk 21
+  targetSdk 28
+  versionCode 1
+  versionName '0.1'
+ }
+ // Only an emulator research fixture, not a Play-distributed APK.
+ // Keep targetSdk 28 for Android compatibility while suppressing exactly
+ // the Play Store target-SDK expiry diagnostic in release lint.
+ lint {
+  disable 'ExpiredTargetSdkVersion'
+ }
+ // Ensure app-native libraries are extracted under the installed
+ // nativeLibraryDir, which has the correct executable file labeling.
+ packaging {
+  jniLibs {
+   useLegacyPackaging true
+  }
+ }
+ buildTypes {
+  release {
+   // Keep the build non-debuggable while signing it for emulator installation.
+   // A root frida-server can instrument non-debuggable packages.
+   debuggable false
+   minifyEnabled false
+   signingConfig signingConfigs.debug
+  }
+ }
+}

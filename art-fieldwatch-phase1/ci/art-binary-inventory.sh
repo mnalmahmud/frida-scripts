@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# Offline ELF visibility evidence (no symbol scan inside the Frida process).
+set -euo pipefail
+out="${ARTWATCH_LOG_DIR:-/tmp/artwatch-logs}"
+mkdir -p "$out"
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+api="$(adb shell getprop ro.build.version.sdk | tr -d '\r')"
+abi="$(adb shell getprop ro.product.cpu.abi | tr -d '\r')"
+{
+  echo "device api=$api abi=$abi"
+  for library in libart.so libart-compiler.so; do
+    source="/apex/com.android.art/lib64/$library"
+    if ! adb pull "$source" "$tmp/$library" >/dev/null 2>&1; then
+      echo "pull-failed $source"
+      continue
+    fi
+    echo "=== $library ==="
+    sha256sum "$tmp/$library"
+    echo "-- build-id --"
+    readelf -n "$tmp/$library" 2>&1 | grep -i -m 1 'Build ID:' || true
+    echo "-- available symbol sections --"
+    readelf -SW "$tmp/$library" 2>&1 | grep -E ' (\.symtab|\.dynsym|\.debug_info|\.gnu_debugdata) ' || true
+    echo "-- targeted symbols (dynamic and full, if available) --"
+    readelf -Ws "$tmp/$library" 2>&1 |
+      grep -E 'HGraphBuilder|OptimizingCompiler|TryCompile|RunOptimizations|PassObserver|JitCompiler.*CompileMethod|jit_load|CompileMethodInternal|BuildInstanceFieldAccess|BuildStaticFieldAccess|HInstanceField(Get|Set)|HStaticField(Get|Set)' |
+      head -n 80 || true
+    echo "-- graph insertion and field node vtable candidates --"
+    readelf -Ws "$tmp/$library" 2>&1 |
+      grep -E '(HBasicBlock.*AddInstruction|HInstructionBuilder.*AppendInstruction|_ZTVN3art[0-9]+H(Unresolved)?(Instance|Static)Field(Get|Set)E)' |
+      head -n 100 || true
+    echo "-- P3 invoke construction/insertion ABI candidates --"
+    readelf -Ws "$tmp/$library" 2>&1 |
+      grep -E '(HInvokeStaticOrDirect|HBasicBlock.*InsertInstruction(After|Before)|HInstruction.*SetEnvironment|HEnvironment.*(Copy|Create)|HInvoke.*(SetArgument|SetRawInputAt)|HGraph.*GetArena)' |
+      head -n 120 || true
+    echo "-- optimization, IR replacement/removal candidates --"
+    readelf -Ws "$tmp/$library" 2>&1 |
+      grep -E '(LoadStoreElimination|LSEVisitor|HInstruction.*ReplaceWith|HBasicBlock.*RemoveInstruction|ReplaceAndRemoveInstruction)' |
+      head -n 100 || true
+    echo "-- HGraphVisitor traversal and instruction ownership symbols --"
+    readelf -Ws "$tmp/$library" 2>&1 |
+      grep -E '(HGraphVisitor.*(VisitBasicBlock|VisitInsertionOrder|VisitReversePostOrder)|HBasicBlock.*AddInstruction|HInstruction.*GetBlock)' |
+      head -n 120 || true
+    echo "-- HGraph/AddBlock and graph checker exports --"
+    readelf -Ws "$tmp/$library" 2>&1 |
+      grep -E '(HGraph.*AddBlock|GraphChecker.*VisitBasicBlock|HGraph.*BuildDominatorTree|HBasicBlock.*GetFirstInstruction|HInstruction.*GetBlock|HGraphVisitor.*VisitBasicBlock)' |
+      head -n 100 || true
+    echo "-- summary --"
+    if readelf -SW "$tmp/$library" | grep -q ' \.symtab '; then
+      echo 'full-symbol-table=present'
+    else
+      echo 'full-symbol-table=absent'
+    fi
+  done
+} > "$out/art-elf-inventory.txt" 2>&1
+cat "$out/art-elf-inventory.txt"
