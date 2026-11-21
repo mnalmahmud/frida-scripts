@@ -29,6 +29,10 @@ abi="$(adb shell getprop ro.product.cpu.abi | tr -d '\r')"
     readelf -Ws "$tmp/$library" 2>&1 |
       grep -E '(HBasicBlock.*AddInstruction|HInstructionBuilder.*AppendInstruction|_ZTVN3art[0-9]+H(Unresolved)?(Instance|Static)Field(Get|Set)E)' |
       head -n 100 || true
+    echo "-- P3 invoke construction/insertion ABI candidates --"
+    readelf -Ws "$tmp/$library" 2>&1 |
+      grep -E '(HInvokeStaticOrDirect|HBasicBlock.*InsertInstruction(After|Before)|HInstruction.*SetEnvironment|HEnvironment.*(Copy|Create)|HInvoke.*(SetArgument|SetRawInputAt)|HGraph.*GetArena)' |
+      head -n 120 || true
     echo "-- optimization, IR replacement/removal candidates --"
     readelf -Ws "$tmp/$library" 2>&1 |
       grep -E '(LoadStoreElimination|LSEVisitor|HInstruction.*ReplaceWith|HBasicBlock.*RemoveInstruction|ReplaceAndRemoveInstruction)' |
