@@ -231,6 +231,8 @@ function attach(layer, site) {
           this.mutationCountsAtEnter = {...mutationHookCounts};
           targetStates.set(this.nativeThread, {
             method: this.method, kind: this.compilationKind,
+            existingInvokeVisits: 0, existingInvokeNodes: new Set(),
+            existingInvokeBlockVisits: 0,
             seenVisits: new Set(), seenKinds: new Set(), uniqueNodes: new Set(),
             visitsByPhase: {}, mutations: [], reported: 0,
             optimizationEntries: 0, lseInvocations: 0,
@@ -257,6 +259,14 @@ function attach(layer, site) {
       onLeave(ret) {
         if (layer === 'compiler') {
           const state = targetStates.get(this.nativeThread);
+          if (state && state.existingInvokeVisits > 0) {
+            send({type:'artwatch-existing-invoke-summary',
+              method:this.method,compilationKind:this.compilationKind,
+              visits:state.existingInvokeVisits,
+              uniqueNodes:state.existingInvokeNodes.size,
+              blockCorrelated:state.existingInvokeBlockVisits,
+              compilationSucceeded:ret.toInt32() !== 0});
+          }
           if (state && targetMethodPointers.has(this.method)) {
             send({type: 'artwatch-target-summary',
               method: this.method, compilationKind: this.compilationKind,
@@ -1049,13 +1059,20 @@ function attachExistingInvokeObserver(compiler) {
           if (!args[0].readPointer().equals(expected)) return;
         } catch (_) { return; }
         const scope = activeVisitorBlockByThread.get(thread);
+        const matchesBlock = !!scope && scope.visitor === args[1].toString();
+        const state = targetStates.get(thread);
+        if (state) {
+          state.existingInvokeVisits++;
+          if (state.existingInvokeNodes.size < 4096)
+            state.existingInvokeNodes.add(args[0].toString());
+          if (matchesBlock) state.existingInvokeBlockVisits++;
+        }
         const ordinal = ++existingInvokeCount;
         if (ordinal > MAX_EXISTING_INVOKES) return;
         send({type:'artwatch-existing-invoke',node:args[0].toString(),
           method:active.method,compilationKind:active.kind,thread,ordinal,
           inOptimization:optimizationByThread.has(thread),
-          block:scope && scope.visitor === args[1].toString()
-            ? scope.block : null});
+          block:matchesBlock ? scope.block : null});
       }
     });
     send({type:'artwatch-hook-attached',layer:'existing_invoke_accept',
