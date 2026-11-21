@@ -57,6 +57,11 @@ let shadowShim = null;
 let shadowModuleAttempted = false;
 let shadowGraphLogged = 0;
 let shadowNodeLogged = 0;
+// Real compiler-built invoke nodes are our ABI oracle; no mutation here.
+const INVOKE_ACCEPT = '_ZN3art21HInvokeStaticOrDirect6AcceptEPNS_13HGraphVisitorE';
+const INVOKE_VTABLE = '_ZTVN3art21HInvokeStaticOrDirectE';
+const MAX_EXISTING_INVOKES = 80;
+let existingInvokeCount = 0;
 const targetDexByMethod = new Map();
 let backendVisitOrdinal = 0;
 const BACKEND_VISIT_LIMIT = 160;
@@ -1027,6 +1032,40 @@ function attachBackendFieldVisitor(compiler, symbol, stage, expectedKind) {
     return false;
   }
 }
+function attachExistingInvokeObserver(compiler) {
+  const site = getExport(compiler, INVOKE_ACCEPT);
+  const vt = getExport(compiler, INVOKE_VTABLE);
+  send({type:'artwatch-existing-invoke-abi',acceptExported:site !== null,
+    vtableExported:vt !== null,writesArtMemory:false});
+  if (!site || !vt) return false;
+  const expected = vt.address.add(2 * Process.pointerSize);
+  try {
+    Interceptor.attach(site.address, {
+      onEnter(args) {
+        const thread = this.threadId;
+        const active = compiling.get(thread);
+        if (!active) return;
+        try {
+          if (!args[0].readPointer().equals(expected)) return;
+        } catch (_) { return; }
+        const scope = activeVisitorBlockByThread.get(thread);
+        const ordinal = ++existingInvokeCount;
+        if (ordinal > MAX_EXISTING_INVOKES) return;
+        send({type:'artwatch-existing-invoke',node:args[0].toString(),
+          method:active.method,compilationKind:active.kind,thread,ordinal,
+          inOptimization:optimizationByThread.has(thread),
+          block:scope && scope.visitor === args[1].toString()
+            ? scope.block : null});
+      }
+    });
+    send({type:'artwatch-hook-attached',layer:'existing_invoke_accept',
+      source:'export',address:site.address.toString()});
+    return true;
+  } catch(e) {
+    log('existing-invoke-hook-error=' + e);
+    return false;
+  }
+}
 function main() {
   const api = sdkLevel();
   log('pid=' + Process.id + ' arch=' + Process.arch +
@@ -1125,6 +1164,7 @@ function main() {
     }
     discoverFieldVtables(compiler);
     discoverValueVtables(compiler);
+    attachExistingInvokeObserver(compiler);
     // The app's onCreate() has not run at agent load time. Resolve the
     // already-loaded shim lazily from compiler callbacks instead.
     loadPassiveShadow();
