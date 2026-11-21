@@ -50,6 +50,10 @@ public final class MainActivity extends Activity {
     // Executed from the real app worker; the host Frida client drains
     // the native records after this completion marker.
     if (android.os.Build.VERSION.SDK_INT == 33) {
+     int carrierChecksum = FieldIRTarget.exerciseP3TemplateCarrier();
+     Log.i("ARTWATCH_CI","P3_TEMPLATE_DONE count=0 checksum=" +
+           carrierChecksum + " nullCheck=true");
+     accumulator += carrierChecksum;
      int canaryChecksum = FieldIRTarget.exerciseP3UninstrumentedCanary();
      Log.i("ARTWATCH_CI","P3_CANARY_DONE count=0 checksum=" +
            canaryChecksum + " nullCheck=true");

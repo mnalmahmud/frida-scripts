@@ -40,6 +40,9 @@ Java_com_example_artfieldwatch_FieldEventSink_recordInt(
     JNIEnv *env, jclass cls, jint site, jint kind, jint value) {
   (void)env;
   (void)cls;
+  // Keep a real, resolved invoke in the P3 template carrier without
+  // counting the deliberately inactive site/kind (0,0) as a field event.
+  if (site == 0 && kind == 0) return;
   uint32_t index = atomic_fetch_add_explicit(&next_index, 1u,
                                              memory_order_relaxed);
   if (index >= EVENT_CAPACITY) {

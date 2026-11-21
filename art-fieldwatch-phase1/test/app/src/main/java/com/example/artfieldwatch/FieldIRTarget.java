@@ -72,6 +72,40 @@ public final class FieldIRTarget {
     return observed;
   }
 
+  // Same-graph native invoke template for a future ART Clone()/InsertInstructionAfter.
+  // The native sink ignores site=kind=0. No counted event can originate
+  // here without compiler injection changing the call's SSA operands.
+  public static int p3TemplateCarrierOn(FieldIRTarget receiver, int x) {
+    receiver.value = x;
+    int observed = identity(receiver).value;
+    FieldEventSink.recordInt(0, 0, observed);
+    return observed;
+  }
+
+  public static int exerciseP3TemplateCarrier() {
+    FieldIRTarget target = new FieldIRTarget();
+    for (int i = 0; i < 100000; i++) {
+      if (p3TemplateCarrierOn(target, i) != i)
+        throw new AssertionError("P3 template warmup mismatch: " + i);
+    }
+    FieldEventSink.reset();
+    int checksum = 0;
+    for (int i = 0; i < 128; i++) {
+      int expected = 7 + 3 * i;
+      int result = p3TemplateCarrierOn(target, expected);
+      if (result != expected)
+        throw new AssertionError("P3 template value mismatch: " + i);
+      checksum += result;
+    }
+    boolean threw = false;
+    try { p3TemplateCarrierOn(null, 777); }
+    catch (NullPointerException expected) { threw = true; }
+    if (!threw) throw new AssertionError("P3 template null write did not throw");
+    if (FieldEventSink.eventCount() != 0)
+      throw new AssertionError("P3 template polluted the event stream");
+    return checksum;
+  }
+
   // No explicit sink calls. The only possible future event source is P3 injection.
   public static int p3CanaryOn(FieldIRTarget receiver, int x) {
     receiver.value = x;
