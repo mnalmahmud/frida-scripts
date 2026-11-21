@@ -51,6 +51,13 @@ Java_com_example_artfieldwatch_FieldEventSink_recordInt(
   events[index].value = (int32_t)value;
   atomic_store_explicit(&ready[index], 1u, memory_order_release);
 }
+// Single-producer negative-control counter. No reset during measurement.
+JNIEXPORT jint JNICALL
+Java_com_example_artfieldwatch_FieldEventSink_eventCount(JNIEnv *env, jclass cls) {
+  (void)env;
+  (void)cls;
+  return (jint)atomic_load_explicit(&next_index, memory_order_acquire);
+}
 // Frida polls this *after* Java logs RUNTIME_EVENTS_DONE. The hot
 // recorder never formats JSON. Snapshot is read-only and bounded.
 // Return 0 when buffer is insufficient or an event is not published yet.
