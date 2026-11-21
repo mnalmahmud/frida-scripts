@@ -72,6 +72,39 @@ public final class FieldIRTarget {
     return observed;
   }
 
+  // No explicit sink calls. The only possible future event source is P3 injection.
+  public static int p3CanaryOn(FieldIRTarget receiver, int x) {
+    receiver.value = x;
+    return identity(receiver).value;
+  }
+
+  public static int exerciseP3UninstrumentedCanary() {
+    FieldIRTarget target = new FieldIRTarget();
+    for (int i = 0; i < 100000; i++) {
+      if (p3CanaryOn(target, i) != i)
+        throw new AssertionError("P3 warmup mismatch: " + i);
+    }
+    FieldEventSink.reset();
+    int checksum = 0;
+    for (int i = 0; i < 128; i++) {
+      int expected = 7 + 3 * i;
+      int result = p3CanaryOn(target, expected);
+      if (result != expected)
+        throw new AssertionError("P3 canary value mismatch: " + i);
+      checksum += result;
+    }
+    boolean threw = false;
+    try {
+      p3CanaryOn(null, 777);
+    } catch (NullPointerException expected) {
+      threw = true;
+    }
+    if (!threw) throw new AssertionError("P3 null write did not throw");
+    if (FieldEventSink.eventCount() != 0)
+      throw new AssertionError("Uninstrumented canary emitted events");
+    return checksum;
+  }
+
   public static int exerciseRuntimeEvents() {
     FieldIRTarget target = new FieldIRTarget();
     // Heat the same method before reset, allowing the JIT to compile it
