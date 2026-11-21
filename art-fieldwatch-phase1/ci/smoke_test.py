@@ -72,6 +72,11 @@ def main():
         if 'SHADOW_LIB_LOADED=true' not in logs.stdout or (
              'EVENT_LIB_LOADED=true' not in logs.stdout):
             raise AssertionError('App failed to load packaged native observer/event libraries')
+        template_marker = 'P3_TEMPLATE_DONE count=0 checksum=25280 nullCheck=true'
+        if template_marker not in logs.stdout:
+            raise AssertionError('Resolved P3 invoke template did not run with zero events')
+        if logs.stdout.index(template_marker) >= logs.stdout.find('P3_CANARY_DONE'):
+            raise AssertionError('P3 template did not run before the silent canary')
         canary_marker = 'P3_CANARY_DONE count=0 checksum=25280 nullCheck=true'
         if canary_marker not in logs.stdout:
             raise AssertionError('P3 raw-field canary must produce zero native events')
