@@ -65,8 +65,8 @@ The first mutation remains **off by default**, exact-ELF-gated, and APK-fixture-
 Source anchors (structural evidence, **not** confirmation of the exact
 on-device ABI):
 - [AOSP Android 13 optimizing source tree](https://android.googlesource.com/platform/art/+/refs/heads/android13-d4-s1-release/compiler/optimizing/)
-- [AOSP nodes.cc insertion and user-list maintenance](https://android.googlesource.com/platform/art/+/391e155a6936a05bd39b171031ec21d2dee62133/compiler/optimizing/nodes.cc)
-- [AOSP nodes.h invoke metadata](https://android.googlesource.com/platform/art/+/b28c8749a52f4f3252fbfe8bfb5f9d7c7f980adf/compiler/optimizing/nodes.h)
+- [AOSP nodes.cc insertion and user-list maintenance](https://android.googlesource.com/platform/art/+/refs/heads/android13-d4-s1-release/compiler/optimizing/nodes.cc)
+- [AOSP nodes.h invoke metadata](https://android.googlesource.com/platform/art/+/refs/heads/android13-d4-s1-release/compiler/optimizing/nodes.h)
 - [AOSP instruction builder](https://android.googlesource.com/platform/art/+/refs/heads/android13-d4-s1-release/compiler/optimizing/instruction_builder.cc)
 - [AOSP graph checker](https://android.googlesource.com/platform/art/+/refs/heads/android13-d4-s1-release/compiler/optimizing/graph_checker.cc)
 
