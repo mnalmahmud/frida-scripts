@@ -72,6 +72,11 @@ def main():
         if 'SHADOW_LIB_LOADED=true' not in logs.stdout or (
              'EVENT_LIB_LOADED=true' not in logs.stdout):
             raise AssertionError('App failed to load packaged native observer/event libraries')
+        canary_marker = 'P3_CANARY_DONE count=0 checksum=25280 nullCheck=true'
+        if canary_marker not in logs.stdout:
+            raise AssertionError('P3 raw-field canary must produce zero native events')
+        if logs.stdout.index(canary_marker) >= logs.stdout.find('RUNTIME_EVENTS_DONE'):
+            raise AssertionError('P3 negative control did not precede the P2 fixture')
         if 'RUNTIME_EVENTS_DONE count=256' not in logs.stdout or (
              'nullCheck=true' not in logs.stdout):
             raise AssertionError('Native runtime field event workload did not complete')
