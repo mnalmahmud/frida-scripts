@@ -1,8 +1,26 @@
 #!/usr/bin/env bash
 set -euo pipefail
 mkdir -p "${ARTWATCH_LOG_DIR:-/tmp/artwatch-logs}"
-adb root
-adb wait-for-device
+# adbd restarts when switching to root. A just-booted API33 emulator can
+# briefly close the transport, returning "unable to connect for root: closed".
+# Retry only the setup operation; never mask errors from the test workload.
+root_ready=0
+for attempt in 1 2 3 4 5 6 7 8; do
+  if adb root && adb wait-for-device; then
+    uid="$(adb shell id -u 2>/dev/null | tr -d '\r' || true)"
+    if [[ "$uid" == 0 ]]; then
+      root_ready=1
+      break
+    fi
+  fi
+  echo "::warning::adbd root not ready (attempt $attempt/8)"
+  sleep 3
+done
+if [[ "$root_ready" -ne 1 ]]; then
+  echo "::error::Android emulator did not stabilize in root mode"
+  adb devices -l || true
+  exit 1
+fi
 variant="${ARTWATCH_BUILD_VARIANT:-debug}"
 case "$variant" in
   debug|release) ;;
