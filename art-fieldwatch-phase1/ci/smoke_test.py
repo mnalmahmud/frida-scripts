@@ -159,6 +159,23 @@ def main():
         if not all(v.get('blockCorrelated', 0) <= v.get('visits', 0)
                    for v in invoke_summaries):
             raise AssertionError('Invalid invoke visitor/block correlation count')
+        backend_layers = {v.get('layer') for v in payloads
+                          if v.get('type') == 'artwatch-hook-attached'
+                          and v.get('layer') in
+                          ('existing_invoke_locations','existing_invoke_emission')}
+        if backend_layers != {'existing_invoke_locations',
+                              'existing_invoke_emission'}:
+            raise AssertionError('API33 invoke codegen hooks missing')
+        if not any(v.get('compilationSucceeded') is True and
+                   v.get('backendEmitted', 0) > 0 and
+                   v.get('backendLocations', 0) >= v.get('backendEmitted', 0)
+                   for v in invoke_summaries):
+            raise AssertionError('No successful JIT with an emitted invoke node')
+        if not all(v.get('backendEmitted',0) >=
+                   len(v.get('emittedInvokeNodes',[])) for v in invoke_summaries):
+            raise AssertionError('Invoke emission sample exceeds observed count')
+        record('host',f'Invoke x64 backend: code-emission nodes=' +
+               str(sum(v.get('backendEmitted',0) for v in invoke_summaries)))
         record('host',f'Existing invoke ABI: samples={len(invoke_samples)} '
                f'compilations={len(invoke_summaries)} '
                f'correlated={sum(v.get("blockCorrelated",0) for v in invoke_summaries)}')
