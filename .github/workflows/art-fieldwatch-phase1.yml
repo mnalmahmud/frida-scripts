@@ -85,7 +85,20 @@ jobs:
             release) task=assembleRelease ;;
             *) exit 1 ;;
           esac
-          gradle -p art-fieldwatch-phase1/test ":app:$task" --no-daemon
+          # Maven/Google repositories occasionally return incomplete metadata
+          # on hosted runners. Retry the whole build, but fail normally after
+          # exhausting attempts; never suppress real compilation errors.
+          for attempt in 1 2 3; do
+            if gradle -p art-fieldwatch-phase1/test ":app:$task" --no-daemon; then
+              exit 0
+            fi
+            if (( attempt == 3 )); then
+              echo "::error::Gradle APK build failed after 3 attempts"
+              exit 1
+            fi
+            echo "::warning::Gradle build attempt $attempt/3 failed; retrying repository resolution"
+            sleep "$((attempt * 10))"
+          done
       - name: Verify packaged native shadow library
         if: matrix.api == 33
         run: |
