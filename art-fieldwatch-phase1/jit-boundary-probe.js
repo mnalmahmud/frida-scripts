@@ -245,7 +245,7 @@ function attach(layer, site) {
             adjacencyRejected: 0, adjacencySamples: [],
             adjacencyWithin8: 0, adjacencyBlockMismatch: 0,
             adjacencyBrokenLinks: 0, adjacencyNoGetWithin8: 0,
-            adjacencyPreviousSamples: [],
+            adjacencyPreviousSamples: [], targetAdjacencyProbes: 0,
             seenVisits: new Set(), seenKinds: new Set(), uniqueNodes: new Set(),
             visitsByPhase: {}, mutations: [], reported: 0,
             optimizationEntries: 0, lseInvocations: 0,
@@ -290,6 +290,7 @@ function attach(layer, site) {
               adjacencyNoGetWithin8:state.adjacencyNoGetWithin8,
               adjacencyPreviousSamples:state.adjacencyPreviousSamples,
               fieldTarget:targetMethodPointers.has(this.method),
+              targetAdjacencyProbes:state.targetAdjacencyProbes,
               emittedInvokeNodes:[...state.existingInvokeEmitted].slice(0,12),
               compilationSucceeded:ret.toInt32() !== 0});
           }
@@ -1084,12 +1085,15 @@ function attachBackendFieldVisitor(compiler, symbol, stage, expectedKind) {
 // This is read-only and never retains HInstruction* past this callback.
 function observeInvokePredecessors(node, scope, getVtable, invokeVtable) {
   const size = Process.pointerSize;
-  const expectedBlock = ptr(scope.block);
+  const expectedBlock = scope ? ptr(scope.block) : null;
   const expectedGet = getVtable.address.add(2 * size);
   let block;
   try {
     block = node.add(3 * size).readPointer();
-    if (!block.equals(expectedBlock)) return {reason:'block'};
+    if (block.isNull() || !Process.findRangeByAddress(block))
+      return {reason:'block'};
+    if (expectedBlock !== null && !block.equals(expectedBlock))
+      return {reason:'block'};
     let cursor = node;
     for (let depth = 1; depth <= 8; depth++) {
       const previous = cursor.add(size).readPointer();
@@ -1138,11 +1142,16 @@ function attachExistingInvokeObserver(compiler) {
         const state = targetStates.get(thread);
         // For this read-only layout walk, require the native shim's exact
         // runtime/compiler ELF IDs; never probe unknown Android builds.
-        if (state && matchesBlock && getVtable && shadowShim &&
+        const fieldTarget = targetMethodPointers.has(active.method);
+        // A baseline compiler may run Invoke::Accept without an active
+        // HGraphVisitor::VisitBasicBlock scope. Use the live invoke's own
+        // basic-block pointer for that exact field-target compilation.
+        if (state && (matchesBlock || fieldTarget) && getVtable && shadowShim &&
             state.adjacencyProbes < 256) {
           const seen = observeInvokePredecessors(
-            args[0],scope,getVtable,vt);
+            args[0],matchesBlock ? scope : null,getVtable,vt);
           state.adjacencyProbes++;
+          if (fieldTarget) state.targetAdjacencyProbes++;
           switch (seen.reason) {
             case 'direct': state.adjacencyMatches++; break;
             case 'nearby': state.adjacencyWithin8++; break;
@@ -1154,11 +1163,13 @@ function attachExistingInvokeObserver(compiler) {
           if (seen.get && state.adjacencySamples.length < 12)
             state.adjacencySamples.push({
               get:seen.get,invoke:args[0].toString(),
-              block:scope.block,depth:seen.depth});
+              block:matchesBlock ? scope.block : null,depth:seen.depth,
+              fieldTarget});
           if (state.adjacencyPreviousSamples.length < 12)
             state.adjacencyPreviousSamples.push({
               node:args[0].toString(),reason:seen.reason,
-              depth:seen.depth || null, block:scope.block});
+              depth:seen.depth || null,
+              block:matchesBlock ? scope.block : null,fieldTarget});
         }
         if (state) {
           state.existingInvokeVisits++;
