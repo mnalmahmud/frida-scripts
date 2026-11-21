@@ -36,8 +36,8 @@ if "$analyzer" dex code --class com.example.artfieldwatch.FieldIRTarget "$apk" >
       exit 1
     fi
     echo "Verified release testViaIdentity DEX retains both iput and iget."
-    awk '/^\\.method.* p3CanaryOn\\(/ { inside=1; next }
-         inside && /^\\.end method/ { exit }
+    awk '/^\.method.* p3CanaryOn\(/ { inside=1; next }
+         inside && /^\.end method/ { exit }
          inside { print }' "$out/fieldir-$variant.smali" > "$out/fieldir-release-p3CanaryOn.smali"
     if ! grep -q 'iput' "$out/fieldir-release-p3CanaryOn.smali" ||
        ! grep -q 'iget' "$out/fieldir-release-p3CanaryOn.smali"; then
