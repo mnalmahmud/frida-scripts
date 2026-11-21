@@ -141,3 +141,52 @@ C++ header/layout, environment construction, allocator plumbing, or
 method-resolution contract required for this. Hook attachment and a
 matching HGraph pointer are necessary but *not sufficient*.
 Until those prerequisites are demonstrated, keep mutation disabled.
+
+
+## 2026-11-21: same-graph clone proof implementation (source unit only)
+
+The device's API33 libart-compiler.so exported
+`HBasicBlock::InsertInstructionAfter(HInstruction*,HInstruction*)` and
+`HBasicBlock::InsertInstructionBefore(HInstruction*,HInstruction*)`, along
+with `HInvokeStaticOrDirect::Accept`. CI run 44896426059 confirmed actual
+invoke visitor callbacks on real compilations and an existing 256-event P2
+oracle. The newer invoke backend assertions remain a separate CI gate.
+
+Experimental C++ file:
+[`native/p3-clone-injector-art.cc`](../../art-fieldwatch-phase1/native/p3-clone-injector-art.cc).
+
+This file contains **actual HGraph mutation code**, but is deliberately
+**not built or loaded by the current NDK CI**. It uses source-level ART
+interfaces, so it must be compiled in the matching ART source environment,
+with the exact ELF Build IDs validated before integration. Its entrypoint
+requires already validated same-graph `HInstanceFieldGet`, a real
+`HInvokeStaticOrDirect` template, and its resolved sink `ArtMethod*`.
+
+The new `p3TemplateCarrierOn()` adds
+`recordInt(0,0,observed)` in the same Java method as a real `iput` and
+`iget`. The native sink excludes this reserved sentinel. The first
+injected clone will use site 9002, kind 1, and the original field-get
+SSA output; only the cloned call can emit a read event.
+
+**Important gates:** adjacency, type, source invoke signature, resolved
+method identity, class-init dispatch, presence of a valid source environment,
+and graph ownership must be checked before mutation. The helper refuses
+nonadjacent nodes, volatiles, and cross-block calls. It clones the invoke,
+replaces its first two SSA operands with constants, inserts immediately before
+the existing call using ART APIs, then copies the original call environment.
+It does not yet identify template and field pointers automatically, install a
+compiler hook, or cover eliminated accesses.
+
+AOSP-compatible research reference for this clone design:
+[Android 13 era AOSPA topaz nodes.h](https://github.com/AOSPA/android_art/blob/topaz/compiler/optimizing/nodes.h),
+[nodes.cc](https://github.com/AOSPA/android_art/blob/topaz/compiler/optimizing/nodes.cc).
+These mirror sources establish the algorithmic contract but **do not prove**
+a binary ABI match with the emulator. Exact matching ART headers and a
+build-tested injector are still required before enabling it.
+
+Before claiming P3 success require: fixture DEX retains the template; the
+actual optimized graph retains its adjacent field get and sink invoke; the
+mutator is built and loaded under the exact build-ID gate; the compiler
+completes with valid SSA and environments; an injected invocation yields
+128 events with the exact expected field-read values; zero-event controls
+remain unchanged; and the P2 256-event oracle still passes.
