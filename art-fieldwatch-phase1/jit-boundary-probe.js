@@ -243,6 +243,9 @@ function attach(layer, site) {
             existingInvokeEmitted: new Set(),
             adjacencyProbes: 0, adjacencyMatches: 0,
             adjacencyRejected: 0, adjacencySamples: [],
+            adjacencyWithin8: 0, adjacencyBlockMismatch: 0,
+            adjacencyBrokenLinks: 0, adjacencyNoGetWithin8: 0,
+            adjacencyPreviousSamples: [],
             seenVisits: new Set(), seenKinds: new Set(), uniqueNodes: new Set(),
             visitsByPhase: {}, mutations: [], reported: 0,
             optimizationEntries: 0, lseInvocations: 0,
@@ -281,6 +284,11 @@ function attach(layer, site) {
               adjacencyMatches:state.adjacencyMatches,
               adjacencyRejected:state.adjacencyRejected,
               adjacencySamples:state.adjacencySamples,
+              adjacencyWithin8:state.adjacencyWithin8,
+              adjacencyBlockMismatch:state.adjacencyBlockMismatch,
+              adjacencyBrokenLinks:state.adjacencyBrokenLinks,
+              adjacencyNoGetWithin8:state.adjacencyNoGetWithin8,
+              adjacencyPreviousSamples:state.adjacencyPreviousSamples,
               emittedInvokeNodes:[...state.existingInvokeEmitted].slice(0,12),
               compilationSucceeded:ret.toInt32() !== 0});
           }
@@ -604,7 +612,7 @@ function attachBlockBoundary(layer, site) {
             this.visitorBlockRecord = {
               visitor: args[0].toString(), block: block.toString(),
               callOrdinal: ++state.blockVisitOrdinal,
-              fieldCount: 0, fields: [], lastGet: null
+              fieldCount: 0, fields: []
             };
             activeVisitorBlockByThread.set(thread,this.visitorBlockRecord);
             if (state.visitorBlocks.size < 4096)
@@ -863,8 +871,6 @@ function attachFieldAccept(compiler) {
               const isGet = /FieldGet$/.test(kind);
               const isSet = /FieldSet$/.test(kind);
               if (isGet || isSet) {
-                if (kind === 'HInstanceFieldGet')
-                  currentBlock.lastGet = args[0];
                 // Captures only relative order of *field* instructions
                 // encountered by one real VisitBasicBlock traversal.
                 // Other IR instructions and phi nodes are omitted.
@@ -1061,6 +1067,50 @@ function attachBackendFieldVisitor(compiler, symbol, stage, expectedKind) {
     return false;
   }
 }
+// Inspect a live invoke's immediate predecessor and at most seven earlier
+// instructions, without relying on a field Accept callback having run first.
+// The previous observation had 0 *attempted* probes: lastGet was never set
+// in the same visitor scope as an invoke. Do not infer non-adjacency from that.
+//
+// Android 13 x86_64 Itanium ABI layout under exact mapped Build-ID gate:
+// vptr +0, HInstruction::previous_ +8, next_ +16, block_ +24.
+// Frida readPointer throws on unreadable memory; the native shim confirms
+// matching reciprocal links only when a direct get predecessor is found.
+// This is read-only and never retains HInstruction* past this callback.
+function observeInvokePredecessors(node, scope, getVtable, invokeVtable) {
+  const size = Process.pointerSize;
+  const expectedBlock = ptr(scope.block);
+  const expectedGet = getVtable.address.add(2 * size);
+  let block;
+  try {
+    block = node.add(3 * size).readPointer();
+    if (!block.equals(expectedBlock)) return {reason:'block'};
+    let cursor = node;
+    for (let depth = 1; depth <= 8; depth++) {
+      const previous = cursor.add(size).readPointer();
+      if (previous.isNull()) return {reason:'no-get'};
+      const mapped = Process.findRangeByAddress(previous);
+      if (!mapped || !mapped.protection.includes('r')) return {reason:'links'};
+      if (!previous.add(2 * size).readPointer().equals(cursor) ||
+          !previous.add(3 * size).readPointer().equals(block))
+        return {reason:'links'};
+      const previousVtable = previous.readPointer();
+      if (previousVtable.equals(expectedGet)) {
+        if (depth === 1 && shadowShim && shadowShim.linkedGetInvoke) {
+          const rc = shadowShim.linkedGetInvoke(
+            previous,node,getVtable.address,invokeVtable.address);
+          return {reason:rc === 1 ? 'direct' : 'rejected',depth,
+            get:previous.toString()};
+        }
+        return {reason:'nearby',depth,get:previous.toString()};
+      }
+      cursor = previous;
+    }
+    return {reason:'no-get'};
+  } catch (_) {
+    return {reason:'links'};
+  }
+}
 function attachExistingInvokeObserver(compiler) {
   const site = getExport(compiler, INVOKE_ACCEPT);
   const vt = getExport(compiler, INVOKE_VTABLE);
@@ -1081,24 +1131,29 @@ function attachExistingInvokeObserver(compiler) {
         const scope = activeVisitorBlockByThread.get(thread);
         const matchesBlock = !!scope && scope.visitor === args[1].toString();
         const state = targetStates.get(thread);
-        // Exact-ELF-gated, source-layout test. Do not retain HInstruction*
-        // past this live invocation. An Accept() callback alone cannot
-        // establish linked-list adjacency or matching HBasicBlock*.
-        if (state && matchesBlock && scope.lastGet && getVtable &&
-            shadowShim && shadowShim.linkedGetInvoke &&
+        // For this read-only layout walk, require the native shim's exact
+        // runtime/compiler ELF IDs; never probe unknown Android builds.
+        if (state && matchesBlock && getVtable && shadowShim &&
             state.adjacencyProbes < 256) {
+          const seen = observeInvokePredecessors(
+            args[0],scope,getVtable,vt);
           state.adjacencyProbes++;
-          const rc = shadowShim.linkedGetInvoke(
-            scope.lastGet, args[0], getVtable.address, vt.address);
-          if (rc === 1) {
-            state.adjacencyMatches++;
-            if (state.adjacencySamples.length < 12)
-              state.adjacencySamples.push({
-                get:scope.lastGet.toString(),invoke:args[0].toString(),
-                block:scope.block});
-          } else if (rc < 0) {
-            state.adjacencyRejected++;
+          switch (seen.reason) {
+            case 'direct': state.adjacencyMatches++; break;
+            case 'nearby': state.adjacencyWithin8++; break;
+            case 'block': state.adjacencyBlockMismatch++; break;
+            case 'links': state.adjacencyBrokenLinks++; break;
+            case 'no-get': state.adjacencyNoGetWithin8++; break;
+            default: state.adjacencyRejected++; break;
           }
+          if (seen.get && state.adjacencySamples.length < 12)
+            state.adjacencySamples.push({
+              get:seen.get,invoke:args[0].toString(),
+              block:scope.block,depth:seen.depth});
+          if (state.adjacencyPreviousSamples.length < 12)
+            state.adjacencyPreviousSamples.push({
+              node:args[0].toString(),reason:seen.reason,
+              depth:seen.depth || null, block:scope.block});
         }
         if (state) {
           state.existingInvokeVisits++;
