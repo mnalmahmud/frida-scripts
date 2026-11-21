@@ -1159,4 +1159,19 @@ function main() {
   log('compile-hooks=' + hooked);
   log('No field interception or compiler IR mutation implemented');
 }
+// Host-facing runtime event transport. Does not rely on compiler tracing.
+// This is a real JNI event recorder populated by executed application code.
+rpc.exports = {
+  runtimeevents() {
+    const module = Process.findModuleByName('libartwatch_events.so');
+    if (!module) return {ready:false,reason:'native event module not loaded'};
+    const address = module.findExportByName('artwatch_events_snapshot');
+    if (address === null) return {ready:false,reason:'snapshot export absent'};
+    const snapshot = new NativeFunction(address,'int',['pointer','uint']);
+    const buffer = Memory.alloc(65536);
+    if (snapshot(buffer,65536) !== 1)
+      return {ready:false,reason:'event publication incomplete or buffer insufficient'};
+    return {ready:true,...JSON.parse(buffer.readUtf8String())};
+  }
+};
 main();

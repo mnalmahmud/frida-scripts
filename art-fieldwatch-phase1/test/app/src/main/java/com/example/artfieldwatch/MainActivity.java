@@ -20,7 +20,9 @@ public final class MainActivity extends Activity {
   if (android.os.Build.VERSION.SDK_INT == 33) {
    try {
     System.loadLibrary("artwatch_shadow");
+    System.loadLibrary("artwatch_events");
     Log.i("ARTWATCH_CI","SHADOW_LIB_LOADED=true");
+    Log.i("ARTWATCH_CI","EVENT_LIB_LOADED=true");
    } catch (UnsatisfiedLinkError e) {
     Log.e("ARTWATCH_CI","SHADOW_LIB_LOAD_FAILED",e);
    }
@@ -44,6 +46,14 @@ public final class MainActivity extends Activity {
       Log.i("ARTWATCH_CI", "LSE_STAGE_DONE=" + stage);
       Thread.sleep(400);
      }
+    }
+    // Executed from the real app worker; the host Frida client drains
+    // the native records after this completion marker.
+    if (android.os.Build.VERSION.SDK_INT == 33) {
+     int runtimeChecksum = FieldIRTarget.exerciseRuntimeEvents();
+     Log.i("ARTWATCH_CI","RUNTIME_EVENTS_DONE count=256 checksum=" +
+           runtimeChecksum + " nullCheck=true");
+     accumulator += runtimeChecksum;
     }
     Log.i("ARTWATCH_CI","WARMUP_DONE checksum=" + accumulator);
    } catch (Throwable t) {

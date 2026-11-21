@@ -26,3 +26,15 @@ jni_dir="art-fieldwatch-phase1/test/app/src/main/jniLibs/x86_64"
 mkdir -p "$jni_dir"
 cp "$out/libartwatch_shadow.so" "$jni_dir/libartwatch_shadow.so"
 echo "Native shadow library staged for APK packaging: $jni_dir"
+
+# The runtime event library is intentionally separate from the passive
+# ART-specific shadow companion. It has no dependency on private ART.
+"$clang" -std=c11 -O2 -fPIC -fvisibility=hidden -fstack-protector-strong \
+  -Wall -Wextra -Werror -shared -Wl,-z,relro -Wl,-z,now \
+  art-fieldwatch-phase1/native/runtime-events.c \
+  -o "$out/libartwatch_events.so"
+readelf -Ws "$out/libartwatch_events.so" |
+  grep -E '(artwatch_events_snapshot|Java_com_example_artfieldwatch_FieldEventSink_(recordInt|reset))' |
+  tee "$out/runtime-events-exports.txt"
+cp "$out/libartwatch_events.so" "$jni_dir/libartwatch_events.so"
+echo "Runtime event library staged for APK packaging: $jni_dir"

@@ -59,6 +59,48 @@ public final class FieldIRTarget {
     return checksum;
   }
 
+  // First executable field-event path. The calls are explicit in Java
+  // bytecode for now; future compiler injection must place equivalent
+  // side-effecting calls at the successful field-access IR boundary.
+  public static int watchedOn(FieldIRTarget receiver, int x) {
+    receiver.value = x; // Throws on null BEFORE any write event.
+    FieldEventSink.recordInt(FieldEventSink.SITE_WRITE_VALUE,
+                             FieldEventSink.WRITE, x);
+    int observed = identity(receiver).value;
+    FieldEventSink.recordInt(FieldEventSink.SITE_READ_VALUE,
+                             FieldEventSink.READ, observed);
+    return observed;
+  }
+
+  public static int exerciseRuntimeEvents() {
+    FieldIRTarget target = new FieldIRTarget();
+    // Heat the same method before reset, allowing the JIT to compile it
+    // naturally. The measured phase contains exactly 128 calls.
+    for (int i = 0; i < 100000; i++) {
+      if (watchedOn(target, i) != i)
+        throw new AssertionError("Native event warmup mismatch at " + i);
+    }
+    FieldEventSink.reset();
+    int checksum = 0;
+    for (int i = 0; i < 128; i++) {
+      int expected = 7 + 3 * i;
+      int result = watchedOn(target, expected);
+      if (result != expected)
+        throw new AssertionError("Native event value mismatch at " + i);
+      checksum += result;
+    }
+    // Null receiver must throw before any successful access callback.
+    boolean threw = false;
+    try {
+      watchedOn(null, 777);
+    } catch (NullPointerException expected) {
+      threw = true;
+    }
+    if (!threw)
+      throw new AssertionError("Null write did not throw NPE");
+    return checksum;
+  }
+
   public static int warmup(int iterations) {
     FieldIRTarget target = new FieldIRTarget();
     int observed = 0;

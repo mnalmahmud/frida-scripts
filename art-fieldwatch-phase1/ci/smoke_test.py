@@ -31,6 +31,7 @@ def main():
     pid = device.spawn(['com.example.artfieldwatch'])
     record('host','spawned-pid='+str(pid))
     session = device.attach(pid)
+    runtime_snapshot = None
     try:
         source = (BASE/'jit-boundary-probe.js').read_text()
         if os.environ.get('ARTWATCH_SHADOW_SHIM') == '1':
@@ -45,6 +46,13 @@ def main():
         # Staged release warmup gives natural JIT workers time to compile
         # all three independently hot field-read/write workloads.
         time.sleep(30 if os.environ.get('ARTWATCH_BUILD_VARIANT') == 'release' else 20)
+        if os.environ.get('ARTWATCH_SHADOW_SHIM') == '1':
+            runtime_snapshot = script.exports_sync.runtimeevents()
+            (LOG_DIR/'runtime-events.json').write_text(
+                json.dumps(runtime_snapshot,indent=2))
+            record('host',f'Native runtime events ready={runtime_snapshot.get("ready")} '
+                   f'total={runtime_snapshot.get("total")} '
+                   f'dropped={runtime_snapshot.get("dropped")}')
     finally:
         try: session.detach()
         except frida.InvalidOperationError: pass
@@ -61,8 +69,27 @@ def main():
     if f'APP_DEBUGGABLE={expected_debug}' not in logs.stdout:
         raise AssertionError(f'Unexpected app debuggable flag for {variant} build')
     if os.environ.get('ARTWATCH_SHADOW_SHIM') == '1':
-        if 'SHADOW_LIB_LOADED=true' not in logs.stdout:
-            raise AssertionError('App failed to load packaged native shadow library')
+        if 'SHADOW_LIB_LOADED=true' not in logs.stdout or (
+             'EVENT_LIB_LOADED=true' not in logs.stdout):
+            raise AssertionError('App failed to load packaged native observer/event libraries')
+        if 'RUNTIME_EVENTS_DONE count=256' not in logs.stdout or (
+             'nullCheck=true' not in logs.stdout):
+            raise AssertionError('Native runtime field event workload did not complete')
+        if not runtime_snapshot or runtime_snapshot.get('ready') is not True:
+            raise AssertionError(f'Native runtime event snapshot unavailable: {runtime_snapshot}')
+        observed = runtime_snapshot.get('events',[])
+        if (runtime_snapshot.get('total') != 256 or len(observed) != 256 or
+            runtime_snapshot.get('dropped') != 0):
+            raise AssertionError('Runtime event count, capacity or delivery mismatch')
+        for i in range(128):
+            expected = 7 + 3 * i
+            write, read = observed[2*i], observed[2*i+1]
+            if write != {'seq':2*i+1,'site':9001,'kind':2,'value':expected}:
+                raise AssertionError(f'Incorrect executed write event at index {i}: {write}')
+            if read != {'seq':2*i+2,'site':9002,'kind':1,'value':expected}:
+                raise AssertionError(f'Incorrect executed read event at index {i}: {read}')
+        record('host','PASS: 256 real native field events, 128 read/write pairs, '
+               'exact values/order, zero drops, no event on null access')
     if 'WARMUP_FAILED' in logs.stdout or 'WARMUP_DONE' not in logs.stdout:
         raise AssertionError('APK fixture warmup failed or timed out')
     if variant == 'release':

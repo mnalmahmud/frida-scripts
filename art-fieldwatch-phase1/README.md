@@ -517,3 +517,39 @@ for a correctly typed, side-effecting event sink.
 
 AOSP reference (structural, not a binary ABI contract):
 https://android.googlesource.com/platform/art/+/refs/heads/android13-release/compiler/optimizing/nodes.h
+
+
+## P2 runtime event transport — executable, but not compiler-injected yet
+
+The previous phase proved compiler-time field identity, block ownership,
+LSE replacement/removal, and native pointer validation. It did **not**
+deliver an event from executed Java code.
+
+This phase adds a real, bounded, zero-allocation-on-hot-path JNI event
+recorder in native/runtime-events.c. It is deliberately packaged as a
+separate libartwatch_events.so, with no dependency on private ART layouts.
+The C recorder takes (site, read/write, int value), reserves a fixed slot
+atomically, publishes the record with release ordering, and counts drops
+instead of allocating when its fixed capacity is exceeded. A separate
+bounded JSON snapshot is exported for Frida RPC *after* the worker finishes.
+
+The fixture FieldIRTarget.watchedOn(receiver, x) now contains **explicit**
+bytecode calls to FieldEventSink.recordInt after a successful field write
+and read. It warms the method naturally, resets the event recorder, runs
+128 instrumented invocations, and checks a null receiver throws before
+any event is recorded. Frida's runtimeevents() RPC returns the actual
+native records; CI asserts 256 events, exact per-site integer values,
+write/read order, no drops, and the absence of a null-access event.
+
+**Scope and critical distinction:** These are genuine runtime events
+from executing JIT-eligible Java code, but the event calls were placed
+explicitly in the fixture by Java source. Arbitrary Java field
+instructions are **not** yet instrumented; ART IR call insertion is
+still required. This isolates the sink ABI, JNI integration, Frida
+delivery and correctness from the dangerous next step of compiler IR
+mutation. The old strict LSE and native-shadow assertions are retained
+unchanged. The prototype covers only successful nonvolatile integer
+accesses; no reference or volatile field support is claimed.
+
+Android's supported JNI loading/symbol contract:
+https://developer.android.com/ndk/guides/jni-tips
