@@ -199,6 +199,14 @@ def main():
             if probe_count != (direct_count + nearby_count + mismatched +
                                broken + no_get + rejected):
                 raise AssertionError('P3 invoke predecessor tallies inconsistent')
+            field_target_summaries = [
+                v for v in invoke_summaries if v.get('fieldTarget') is True]
+            field_target_probes = sum(
+                v.get('targetAdjacencyProbes',0) for v in field_target_summaries)
+            record('host',f'P3 field-target predecessor probes={field_target_probes} '
+                   f'compilations={len(field_target_summaries)}')
+            if not field_target_summaries or field_target_probes == 0:
+                raise AssertionError('No baseline field-target invoke predecessor scans')
         record('host',f'Invoke x64 backend: code-emission nodes=' +
                str(sum(v.get('backendEmitted',0) for v in invoke_summaries)))
         record('host',f'Existing invoke ABI: samples={len(invoke_samples)} '
