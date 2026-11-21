@@ -15,4 +15,5 @@ public final class FieldEventSink {
 
   public static native void recordInt(int site, int kind, int value);
   public static native void reset();
+  public static native int eventCount();
 }
