@@ -42,7 +42,7 @@ def main():
             if sink_info.get('dex') != 'classes.dex':
                 raise AssertionError('P3 probe currently supports the primary DEX only')
             source = ('globalThis.__artwatchSinkMethodIndex = ' +
-                      json.dumps(sink_info['methodIndex']) + ';\\n' + source)
+                      json.dumps(sink_info['methodIndex']) + ';\n' + source)
         if os.environ.get('ARTWATCH_SHADOW_SHIM') == '1':
             source = ('globalThis.__artwatchShadowPath = ' +
                       json.dumps('libartwatch_shadow.so') +
