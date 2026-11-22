@@ -77,8 +77,9 @@ public final class FieldIRTarget {
   // here without compiler injection changing the call's SSA operands.
   public static int p3TemplateCarrierOn(FieldIRTarget receiver, int x) {
     receiver.value = x;
+    FieldEventSink.recordInt(0, 0, x); // write template (cloned by ART)
     int observed = identity(receiver).value;
-    FieldEventSink.recordInt(0, 0, observed);
+    FieldEventSink.recordInt(0, 0, observed); // read template (cloned by ART)
     return observed;
   }
 

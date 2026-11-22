@@ -86,7 +86,7 @@ def main():
             raise AssertionError('App failed to load packaged native observer/event libraries')
         p3_inject = os.environ.get('ARTWATCH_P3_INJECT') == '1'
         if p3_inject:
-            template_marker = 'P3_TEMPLATE_DONE count=128 checksum=25280 nullCheck=true injected=true'
+            template_marker = 'P3_TEMPLATE_DONE count=256 checksum=25280 nullCheck=true injected=true'
         else:
             template_marker = 'P3_TEMPLATE_DONE count=0 checksum=25280 nullCheck=true injected=false'
         if template_marker not in logs.stdout:

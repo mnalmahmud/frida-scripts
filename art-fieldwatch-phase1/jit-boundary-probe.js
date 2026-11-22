@@ -182,7 +182,7 @@ function loadPassiveShadow() {
       cloneTemplate: exported('artwatch_shadow_clone_template_invoke','int',
         ['pointer','pointer','pointer','pointer','uint','uint','pointer']),
       cloneBefore: exported('artwatch_shadow_clone_invoke_before','int',
-        ['pointer','pointer','pointer','uint','uint','pointer','pointer'])
+        ['pointer','pointer','pointer','uint','uint','pointer','pointer','int'])
     };
     send({type:'artwatch-shadow-init',ready:true,source:'native',
       buildIdVerified:true,mutable:false});
@@ -1299,23 +1299,25 @@ function attachExistingInvokeBackend(compiler, symbol, stage) {
 function attachP3CloneCanary(compiler) {
   if (globalThis.__artwatchP3Inject !== true) return false;
   const fixture=globalThis.__artwatchP3Fixture;
-  if (!fixture || !Number.isInteger(fixture.getDexPc) ||
-      !Number.isInteger(fixture.invokeDexPc)) return false;
+  if (!fixture || ['setDexPc','writeInvokeDexPc','getDexPc','readInvokeDexPc']
+      .some(k=>!Number.isInteger(fixture[k]))) return false;
   const site=getExport(compiler,INVOKE_ACCEPT);
   const insert=getExport(compiler,
     '_ZN3art11HBasicBlock23InsertInstructionBeforeEPNS_12HInstructionES2_');
   const copyEnv=getExport(compiler,'_ZN3art12HEnvironment8CopyFromEPS0_');
   const invokeVt=getExport(compiler,INVOKE_VTABLE);
   const getVt=getExport(compiler,'_ZTVN3art17HInstanceFieldGetE');
-  if (!site || !insert || !copyEnv || !invokeVt || !getVt) return false;
+  const setVt=getExport(compiler,'_ZTVN3art17HInstanceFieldSetE');
+  if (!site || !insert || !copyEnv || !invokeVt || !getVt || !setVt)
+    return false;
   let cloning=false;
-  let successes=0;
+  const successfulKinds=new Set();
   let attempts=0;
   let missedBuilder=0;
   try {
     Interceptor.attach(site.address,{
       onEnter(args) {
-        if (cloning || successes!==0) return;
+        if (cloning || successfulKinds.size===2) return;
         const thread=this.threadId;
         const active=compiling.get(thread);
         const state=targetStates.get(thread);
@@ -1330,14 +1332,22 @@ function attachP3CloneCanary(compiler) {
           if (!node.readPointer().equals(invokeVt.address.add(2*size)))
             return;
           const pc=Memory.alloc(4);
-          if (shadowShim.instructionDexPc(node,invokeVt.address,pc)!==1 ||
-              pc.readU32()!==fixture.invokeDexPc) return;
+          if (shadowShim.instructionDexPc(node,invokeVt.address,pc)!==1)
+            return;
+          const invokePc=pc.readU32();
+          const isWrite=invokePc===fixture.writeInvokeDexPc;
+          const isRead=invokePc===fixture.readInvokeDexPc;
+          if (!isWrite && !isRead) return;
+          const kind=isWrite?'write':'read';
+          if (successfulKinds.has(kind)) return;
+          const fieldVt=isWrite?setVt:getVt;
+          const fieldPc=isWrite?fixture.setDexPc:fixture.getDexPc;
           const previous=node.add(size).readPointer();
           if (previous.isNull() ||
-              !previous.readPointer().equals(getVt.address.add(2*size)))
+              !previous.readPointer().equals(fieldVt.address.add(2*size)))
             return;
-          if (shadowShim.instructionDexPc(previous,getVt.address,pc)!==1 ||
-              pc.readU32()!==fixture.getDexPc) return;
+          if (shadowShim.instructionDexPc(previous,fieldVt.address,pc)!==1 ||
+              pc.readU32()!==fieldPc) return;
           // Same-graph clone immediately before original invoke.
           // No HInstructionBuilder state is required, so this also works
           // when ART inlines AppendInstruction.
@@ -1345,15 +1355,15 @@ function attachP3CloneCanary(compiler) {
           cloning=true;
           try {
             const rc=shadowShim.cloneBefore(node,
-              getVt.address,invokeVt.address,
-              fixture.getDexPc,fixture.invokeDexPc,
-              insert.address,copyEnv.address);
+              fieldVt.address,invokeVt.address,
+              fieldPc,invokePc,insert.address,copyEnv.address,
+              isWrite?2:1);
             send({type:'artwatch-p3-clone',rc,method:active.method,
-              attempt:attempts,trigger:'invoke_accept',
-              getDexPc:fixture.getDexPc,invokeDexPc:fixture.invokeDexPc});
+              kind,attempt:attempts,trigger:'invoke_accept',
+              fieldDexPc:fieldPc,invokeDexPc});
             if (rc===1) {
-              successes++;
-              p3PendingMethod = active.method;
+              successfulKinds.add(kind);
+              if (successfulKinds.size===2) p3PendingMethod=active.method;
             }
           } finally {cloning=false;}
         } catch(e) {

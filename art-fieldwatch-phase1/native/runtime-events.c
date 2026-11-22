@@ -33,13 +33,16 @@ Java_com_example_artfieldwatch_FieldEventSink_p3Enabled(JNIEnv *env,jclass cls) 
 JNIEXPORT jboolean JNICALL
 Java_com_example_artfieldwatch_FieldEventSink_p3Verified(JNIEnv *env,jclass cls) {
   (void)env; (void)cls;
-  if (atomic_load_explicit(&next_index,memory_order_acquire)!=128u ||
+  if (atomic_load_explicit(&next_index,memory_order_acquire)!=256u ||
       atomic_load_explicit(&dropped,memory_order_acquire)!=0u)
     return JNI_FALSE;
   for (uint32_t i=0;i<128u;++i) {
-    if (atomic_load_explicit(&ready[i],memory_order_acquire)!=1u ||
-        events[i].site!=9002u || events[i].kind!=1u ||
-        events[i].value!=(int32_t)(7u+3u*i))
+    if (atomic_load_explicit(&ready[2u*i],memory_order_acquire)!=1u ||
+        atomic_load_explicit(&ready[2u*i+1u],memory_order_acquire)!=1u ||
+        events[2u*i].site!=9001u || events[2u*i].kind!=2u ||
+        events[2u*i].value!=(int32_t)(7u+3u*i) ||
+        events[2u*i+1u].site!=9002u || events[2u*i+1u].kind!=1u ||
+        events[2u*i+1u].value!=(int32_t)(7u+3u*i))
       return JNI_FALSE;
   }
   return JNI_TRUE;
@@ -71,12 +74,13 @@ Java_com_example_artfieldwatch_FieldEventSink_recordInt(
   if (site == 0 && kind == 0) {
     if (!atomic_load_explicit(&p3_enabled,memory_order_acquire)) return;
     // ART inserts the cloned call immediately BEFORE the source invoke.
-    // Only record the first (compiler-inserted) invocation of each pair.
+    // Record only cloned write then cloned read calls, not Java source calls.
     // Ignore the original Java-authored sentinel entirely.
     uint32_t n=atomic_fetch_add_explicit(&p3_sentinel_sequence,1u,
                                          memory_order_relaxed);
     if ((n & 1u)!=0u) return;
-    site=9002; kind=1;
+    site=(n & 2u)==0u ? 9001 : 9002;
+    kind=(n & 2u)==0u ? 2 : 1;
   }
   uint32_t index = atomic_fetch_add_explicit(&next_index, 1u,
                                              memory_order_relaxed);

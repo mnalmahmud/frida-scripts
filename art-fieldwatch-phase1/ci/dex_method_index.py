@@ -161,21 +161,29 @@ def canary_pcs(data, sink_idx):
                 insns_start = code_off + 16
                 if insn_count > len(data) // 2 or insns_start + 2*insn_count > len(data):
                     raise ValueError("invalid P3 carrier code bounds")
+                candidates_set = []
                 candidates_get = []
                 candidates_invoke = []
                 for pc in range(insn_count):
                     op = u16(data, insns_start + pc*2) & 0xff
+                    if op == 0x59:
+                        candidates_set.append(pc)
                     if op == 0x52:
                         candidates_get.append(pc)
                     if op in (0x71, 0x77) and pc+1 < insn_count:
                         method_id = u16(data, insns_start+(pc+1)*2)
                         if method_id == sink_idx:
                             candidates_invoke.append(pc)
-                if len(candidates_get) != 1 or len(candidates_invoke) != 1:
-                    raise ValueError(f"ambiguous P3 opcodes: gets={candidates_get} invokes={candidates_invoke}")
+                if (len(candidates_set)!=1 or len(candidates_get)!=1 or
+                    len(candidates_invoke)!=2 or
+                    not (candidates_set[0] < candidates_invoke[0] <
+                         candidates_get[0] < candidates_invoke[1])):
+                    raise ValueError(f"bad P3 templates: sets={candidates_set} gets={candidates_get} invokes={candidates_invoke}")
                 found.append({"carrierMethodIndex":method_index,
+                              "setDexPc":candidates_set[0],
+                              "writeInvokeDexPc":candidates_invoke[0],
                               "getDexPc":candidates_get[0],
-                              "invokeDexPc":candidates_invoke[0]})
+                              "readInvokeDexPc":candidates_invoke[1]})
     if len(found) != 1:
         raise ValueError(f"expected one P3 carrier method, found {len(found)}")
     return found[0]

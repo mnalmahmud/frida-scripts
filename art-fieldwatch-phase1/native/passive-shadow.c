@@ -359,12 +359,14 @@ EXPORT int artwatch_shadow_clone_template_invoke(
 EXPORT int artwatch_shadow_clone_invoke_before(
     const void *source, const void *get_vtable, const void *invoke_vtable,
     uint32_t expected_get_pc, uint32_t expected_invoke_pc,
-    const void *insert_address, const void *copy_env_address) {
-  if (ready != 1 || !aligned(source) || !aligned(get_vtable) ||
+    const void *insert_address, const void *copy_env_address,
+    int field_kind) {
+  if ((field_kind!=1 && field_kind!=2) || ready != 1 || !aligned(source) || !aligned(get_vtable) ||
       !aligned(invoke_vtable) || !aligned(insert_address) ||
       !aligned(copy_env_address)) return -1;
   struct {const void *address; const char *name;} syms[4] = {
-    {get_vtable,"_ZTVN3art17HInstanceFieldGetE"},
+    {get_vtable,field_kind==2 ?
+      "_ZTVN3art17HInstanceFieldSetE" : "_ZTVN3art17HInstanceFieldGetE"},
     {invoke_vtable,"_ZTVN3art21HInvokeStaticOrDirectE"},
     {insert_address,
       "_ZN3art11HBasicBlock23InsertInstructionBeforeEPNS_12HInstructionES2_"},
