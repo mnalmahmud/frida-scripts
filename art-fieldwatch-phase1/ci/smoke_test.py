@@ -32,6 +32,7 @@ def main():
     record('host','spawned-pid='+str(pid))
     session = device.attach(pid)
     runtime_snapshot = None
+    p3_snapshot = None
     try:
         source = (BASE/'jit-boundary-probe.js').read_text()
         sink_inventory = LOG_DIR / ('p3-sink-method-' +
@@ -60,6 +61,13 @@ def main():
         time.sleep(30 if os.environ.get('ARTWATCH_BUILD_VARIANT') == 'release' else 20)
         if os.environ.get('ARTWATCH_SHADOW_SHIM') == '1':
             runtime_snapshot = script.exports_sync.runtimeevents()
+            if os.environ.get('ARTWATCH_P3_INJECT') == '1':
+                p3_snapshot = script.exports_sync.p3events()
+                (LOG_DIR/'p3-injected-events.json').write_text(
+                    json.dumps(p3_snapshot,indent=2))
+                record('host',f'P3 compiled events ready={p3_snapshot.get("ready")} '
+                       f'total={p3_snapshot.get("total")} '
+                       f'dropped={p3_snapshot.get("dropped")}')
             (LOG_DIR/'runtime-events.json').write_text(
                 json.dumps(runtime_snapshot,indent=2))
             record('host',f'Native runtime events ready={runtime_snapshot.get("ready")} '
@@ -91,6 +99,22 @@ def main():
             template_marker = 'P3_TEMPLATE_DONE count=0 checksum=25280 nullCheck=true injected=false'
         if template_marker not in logs.stdout:
             raise AssertionError('P3 compiler-insertion result mismatch: ' + template_marker)
+        if p3_inject:
+            if not p3_snapshot or p3_snapshot.get('ready') is not True or (
+                 p3_snapshot.get('total') != 256 or p3_snapshot.get('dropped') != 0):
+                raise AssertionError(f'Independent P3 runtime snapshot unavailable: {p3_snapshot}')
+            p3_events = p3_snapshot.get('events',[])
+            if len(p3_events) != 256:
+                raise AssertionError(f'Expected 256 P3 events, got {len(p3_events)}')
+            for i in range(128):
+                expected = 7 + 3 * i
+                write, read = p3_events[2*i], p3_events[2*i+1]
+                if write != {'seq':2*i+1,'site':9001,'kind':2,'value':expected}:
+                    raise AssertionError(f'P3 incorrect write event at {i}: {write}')
+                if read != {'seq':2*i+2,'site':9002,'kind':1,'value':expected}:
+                    raise AssertionError(f'P3 incorrect read event at {i}: {read}')
+            record('host','PASS: independently archived 256 P3 injected-context '
+                   'events with exact values/order and zero drops')
         if logs.stdout.index(template_marker) >= logs.stdout.find('P3_CANARY_DONE'):
             raise AssertionError('P3 template did not run before the silent canary')
         canary_marker = 'P3_CANARY_DONE count=0 checksum=25280 nullCheck=true'

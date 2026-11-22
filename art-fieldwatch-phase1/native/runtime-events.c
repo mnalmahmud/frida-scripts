@@ -7,6 +7,7 @@
 #include <stdatomic.h>
 #include <stddef.h>
 #include <stdio.h>
+#include <string.h>
 
 #define EVENT_EXPORT __attribute__((visibility("default")))
 #define EVENT_CAPACITY 512u
@@ -21,6 +22,9 @@ static atomic_uint next_index = 0;
 static atomic_uint dropped = 0;
 static atomic_uint p3_enabled = 0;
 static atomic_uint p3_sentinel_sequence = 0;
+// Frozen after P3 verification, before the independent P2 workload resets events.
+static struct field_event p3_verified_events[256];
+static atomic_uint p3_archive_ready = 0;
 // Only the controlled fixture sets P3; ordinary P2 events are unchanged.
 EVENT_EXPORT void artwatch_events_set_p3(int enabled) {
   atomic_store_explicit(&p3_enabled, enabled ? 1u : 0u, memory_order_release);
@@ -45,6 +49,8 @@ Java_com_example_artfieldwatch_FieldEventSink_p3Verified(JNIEnv *env,jclass cls)
         events[2u*i+1u].value!=(int32_t)(7u+3u*i))
       return JNI_FALSE;
   }
+  memcpy(p3_verified_events, events, sizeof(p3_verified_events));
+  atomic_store_explicit(&p3_archive_ready, 1u, memory_order_release);
   return JNI_TRUE;
 }
 
@@ -103,24 +109,25 @@ Java_com_example_artfieldwatch_FieldEventSink_eventCount(JNIEnv *env, jclass cls
 // Frida polls this *after* Java logs RUNTIME_EVENTS_DONE. The hot
 // recorder never formats JSON. Snapshot is read-only and bounded.
 // Return 0 when buffer is insufficient or an event is not published yet.
-EVENT_EXPORT int artwatch_events_snapshot(char *out, uint32_t length) {
+static int format_events(char *out, uint32_t length,
+                         const struct field_event *stored_events,
+                         uint32_t total, uint32_t lost, uint32_t count,
+                         int check_live_ready) {
   if (out == NULL || length < 512) return 0;
-  const uint32_t total = atomic_load_explicit(&next_index, memory_order_acquire);
-  const uint32_t lost = atomic_load_explicit(&dropped, memory_order_acquire);
-  const uint32_t stored = total < EVENT_CAPACITY ? total : EVENT_CAPACITY;
   size_t used = 0;
   int written = snprintf(out, length,
     "{\"version\":1,\"total\":%u,\"dropped\":%u,\"capacity\":%u,\"events\":[",
     total, lost, EVENT_CAPACITY);
   if (written < 0 || (size_t)written >= length) return 0;
   used += (size_t)written;
-  for (uint32_t i = 0; i < stored; ++i) {
-    if (atomic_load_explicit(&ready[i], memory_order_acquire) != 1u) return 0;
+  for (uint32_t i = 0; i < count; ++i) {
+    if (check_live_ready &&
+        atomic_load_explicit(&ready[i], memory_order_acquire) != 1u) return 0;
     if (used >= length) return 0;
     written = snprintf(out + used, length - used,
       "%s{\"seq\":%u,\"site\":%u,\"kind\":%u,\"value\":%d}",
       i == 0 ? "" : ",", i + 1u,
-      events[i].site, events[i].kind, events[i].value);
+      stored_events[i].site, stored_events[i].kind, stored_events[i].value);
     if (written < 0 || (size_t)written >= length - used) return 0;
     used += (size_t)written;
   }
@@ -129,4 +136,18 @@ EVENT_EXPORT int artwatch_events_snapshot(char *out, uint32_t length) {
   out[used++] = '}';
   out[used] = '\0';
   return 1;
+}
+
+// Export the verified P3 data independently of the later P2 reset.
+EVENT_EXPORT int artwatch_events_p3_snapshot(char *out, uint32_t length) {
+  if (atomic_load_explicit(&p3_archive_ready, memory_order_acquire) != 1u)
+    return 0;
+  return format_events(out, length, p3_verified_events, 256u, 0u, 256u, 0);
+}
+
+EVENT_EXPORT int artwatch_events_snapshot(char *out, uint32_t length) {
+  const uint32_t total = atomic_load_explicit(&next_index, memory_order_acquire);
+  const uint32_t lost = atomic_load_explicit(&dropped, memory_order_acquire);
+  const uint32_t count = total < EVENT_CAPACITY ? total : EVENT_CAPACITY;
+  return format_events(out, length, events, total, lost, count, 1);
 }
