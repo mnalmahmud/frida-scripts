@@ -70,11 +70,12 @@ Java_com_example_artfieldwatch_FieldEventSink_recordInt(
   // counting the deliberately inactive site/kind (0,0) as a field event.
   if (site == 0 && kind == 0) {
     if (!atomic_load_explicit(&p3_enabled,memory_order_acquire)) return;
-    // One original Java call and one compiler-cloned call per invocation.
-    // Counting every second sentinel deliberately fails when no clone ran.
+    // ART inserts the cloned call immediately BEFORE the source invoke.
+    // Only record the first (compiler-inserted) invocation of each pair.
+    // Ignore the original Java-authored sentinel entirely.
     uint32_t n=atomic_fetch_add_explicit(&p3_sentinel_sequence,1u,
                                          memory_order_relaxed);
-    if ((n & 1u)==0u) return;
+    if ((n & 1u)!=0u) return;
     site=9002; kind=1;
   }
   uint32_t index = atomic_fetch_add_explicit(&next_index, 1u,
