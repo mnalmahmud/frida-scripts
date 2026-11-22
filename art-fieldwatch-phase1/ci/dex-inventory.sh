@@ -14,6 +14,10 @@ unzip -p "$apk" classes.dex | sha256sum | tee "$out/dex-sha256-$variant.txt"
 # packaged DEX (it can change across debug/release, or between builds).
 python3 art-fieldwatch-phase1/ci/dex_method_index.py "$apk" |
   tee "$out/p3-sink-method-$variant.json"
+# Generic APK-wide field identities: all instance/static get/set opcodes,
+# with declaring class, field type/name, enclosing method, DEX PC and source line.
+python3 art-fieldwatch-phase1/ci/dex_field_sites.py "$apk" \
+  --output "$out/field-sites-$variant.json"
 analyzer="${ANDROID_HOME:-}/cmdline-tools/latest/bin/apkanalyzer"
 if [[ ! -x "$analyzer" ]]; then
   analyzer="$(command -v apkanalyzer || true)"

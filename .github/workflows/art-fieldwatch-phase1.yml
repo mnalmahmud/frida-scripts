@@ -24,6 +24,7 @@ jobs:
       - run: python3 -m py_compile art-fieldwatch-phase1/ci/smoke_test.py
       - run: python3 -m py_compile art-fieldwatch-phase1/ci/dex_method_index.py
       - run: python3 art-fieldwatch-phase1/ci/dex_method_index.py --self-test
+      - run: python3 art-fieldwatch-phase1/ci/dex_field_sites.py --self-test
       - run: bash -n art-fieldwatch-phase1/ci/run-emulator-smoke.sh
       - run: bash -n art-fieldwatch-phase1/ci/dex-inventory.sh
       - run: bash -n art-fieldwatch-phase1/ci/build-passive-shim.sh

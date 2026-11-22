@@ -214,7 +214,7 @@ def self_test():
     assert FIELD_OPS[0x6d]=={"access":"static","operation":"write","valueKind":"short"}
     assert insn_width(b"\x52\x00\x03\x00",0,0,2)==2
     assert insn_width(b"\x00\x01\x02\x00"+b"\0"*12,0,0,8)==8
-    assert insn_width(b"\x00\x03\x02\x00\x03\x00\x00\x00"+b"\0"*4,0,0,6)==6
+    assert insn_width(b"\x00\x03\x02\x00\x03\x00\x00\x00"+b"\0"*6,0,0,7)==7
     try: insn_width(b"\x52\x00",0,0,1)
     except ValueError: pass
     else: raise AssertionError("truncated field instruction accepted")
