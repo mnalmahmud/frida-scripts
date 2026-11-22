@@ -39,8 +39,8 @@ def main():
                                      '.json')
         if sink_inventory.is_file() and os.environ.get('ARTWATCH_SHADOW_SHIM') == '1':
             sink_info = json.loads(sink_inventory.read_text())
-            if sink_info.get('dex') != 'classes.dex':
-                raise AssertionError('P3 probe currently supports the primary DEX only')
+            if not str(sink_info.get('dex','')).startswith('classes'):
+                raise AssertionError('P3 sink was not found in a packaged DEX')
             source = ('globalThis.__artwatchP3Fixture = ' +
                       json.dumps(sink_info) + ';\n' +
                       'globalThis.__artwatchP3Inject = ' +
