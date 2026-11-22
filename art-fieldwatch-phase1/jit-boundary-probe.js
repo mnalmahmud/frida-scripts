@@ -177,7 +177,9 @@ function loadPassiveShadow() {
       linkedGetInvoke: exported('artwatch_shadow_linked_get_invoke','int',
         ['pointer','pointer','pointer','pointer']),
       instructionDexPc: exported('artwatch_shadow_instruction_dex_pc','int',
-        ['pointer','pointer','pointer'])
+        ['pointer','pointer','pointer']),
+      cloneTemplate: exported('artwatch_shadow_clone_template_invoke','int',
+        ['pointer','pointer','pointer','pointer','uint','uint'])
     };
     send({type:'artwatch-shadow-init',ready:true,source:'native',
       buildIdVerified:true,mutable:false});
@@ -1266,6 +1268,84 @@ function attachExistingInvokeBackend(compiler, symbol, stage) {
     return false;
   }
 }
+// The first opt-in compiler mutation. Only a packaged APK fixture can
+// enable this. We clone the already-resolved zero-site native sink invoke,
+// preserving the original SSA value and using ART's own AppendInstruction
+// to attach and initialize it. No allocation or object mutation in JS.
+function attachP3CloneCanary(compiler) {
+  if (globalThis.__artwatchP3Inject !== true) return false;
+  const fixture=globalThis.__artwatchP3Fixture;
+  if (!fixture || !Number.isInteger(fixture.getDexPc) ||
+      !Number.isInteger(fixture.invokeDexPc)) return false;
+  const append=getExport(compiler,NAMES.appendInstruction);
+  const vt=getExport(compiler,INVOKE_VTABLE);
+  const get=getExport(compiler,'_ZTVN3art17HInstanceFieldGetE');
+  if (!append || !vt || !get) return false;
+  const seen=new Set();
+  let inClone=false;
+  let eventEnable=null;
+  let complete=0;
+  try {
+    Interceptor.attach(append.address,{
+      onEnter(args) {
+        this.candidate=null;
+        if (inClone || complete > 0) return;
+        const active=compiling.get(this.threadId);
+        if (!active || !targetMethodPointers.has(active.method)) return;
+        if (!shadowShim) loadPassiveShadow();
+        if (!shadowShim || !shadowShim.cloneTemplate ||
+            !shadowShim.instructionDexPc) return;
+        const node=args[1];
+        try {
+          if (!node.readPointer().equals(vt.address.add(2*Process.pointerSize)))
+            return;
+          const p=Memory.alloc(4);
+          if (shadowShim.instructionDexPc(node,vt.address,p)!==1 ||
+              p.readU32()!==fixture.invokeDexPc) return;
+          const previous=node.add(Process.pointerSize).readPointer();
+          if (previous.isNull() ||
+              !previous.readPointer().equals(get.address.add(2*Process.pointerSize)))
+            return;
+          if (shadowShim.instructionDexPc(previous,get.address,p)!==1 ||
+              p.readU32()!==fixture.getDexPc) return;
+          if (seen.has(active.method)) return;
+          this.candidate={builder:args[0],node,method:active.method};
+        } catch (_) {}
+      },
+      onLeave() {
+        if (!this.candidate || inClone) return;
+        const {builder,node,method}=this.candidate;
+        inClone=true;
+        try {
+          const rc=shadowShim.cloneTemplate(builder,node,get.address,
+            vt.address,fixture.getDexPc,fixture.invokeDexPc);
+          send({type:'artwatch-p3-clone',rc,method,
+            getDexPc:fixture.getDexPc,invokeDexPc:fixture.invokeDexPc});
+          if (rc===1) {
+            complete++;
+            seen.add(method);
+            if (eventEnable===null) {
+              const library=Process.findModuleByName('libartwatch_events.so');
+              if (library) {
+                const p=library.findExportByName('artwatch_events_set_p3');
+                if (p) eventEnable=new NativeFunction(p,'void',['int']);
+              }
+            }
+            if (eventEnable) eventEnable(1);
+          }
+        } catch(e) {
+          send({type:'artwatch-p3-clone-error',error:String(e)});
+        } finally {inClone=false;}
+      }
+    });
+    send({type:'artwatch-hook-attached',layer:'p3_clone_canary',
+      address:append.address.toString(),source:'export'});
+    return true;
+  } catch(e) {
+    send({type:'artwatch-p3-clone-error',error:String(e)});
+    return false;
+  }
+}
 function main() {
   const api = sdkLevel();
   log('pid=' + Process.id + ' arch=' + Process.arch +
@@ -1365,6 +1445,7 @@ function main() {
     discoverFieldVtables(compiler);
     discoverValueVtables(compiler);
     attachExistingInvokeObserver(compiler);
+    attachP3CloneCanary(compiler);
     attachExistingInvokeBackend(compiler,INVOKE_BACKEND_LOCATIONS,'locations');
     attachExistingInvokeBackend(compiler,INVOKE_BACKEND_EMISSION,'emission');
     // The app's onCreate() has not run at agent load time. Resolve the
