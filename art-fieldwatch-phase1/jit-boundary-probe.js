@@ -182,7 +182,7 @@ function loadPassiveShadow() {
       cloneTemplate: exported('artwatch_shadow_clone_template_invoke','int',
         ['pointer','pointer','pointer','pointer','uint','uint','pointer']),
       cloneBefore: exported('artwatch_shadow_clone_invoke_before','int',
-        ['pointer','pointer','pointer','uint','uint','pointer','pointer','int'])
+        ['pointer','pointer','pointer','uint','uint','pointer','pointer','int','pointer'])
     };
     send({type:'artwatch-shadow-init',ready:true,source:'native',
       buildIdVerified:true,mutable:false});
@@ -246,7 +246,7 @@ function attach(layer, site) {
             method: this.method, kind: this.compilationKind,
             existingInvokeVisits: 0, existingInvokeNodes: new Set(),
             existingInvokeBlockVisits: 0,
-            p3Builder: null,
+            p3Builder: null, p3ClonedNodes: new Map(),
             existingInvokeLocations: new Set(),
             existingInvokeEmitted: new Set(),
             adjacencyProbes: 0, adjacencyMatches: 0,
@@ -287,13 +287,22 @@ function attach(layer, site) {
             p3PendingMethod = null;
             const module = Process.findModuleByName('libartwatch_events.so');
             const fn = module && module.findExportByName('artwatch_events_set_p3');
-            if (succeeded && fn !== null) {
+            const proofs = ['write','read'].map(kind => {
+              const node=state && state.p3ClonedNodes.get(kind);
+              return {kind,node:node||null,
+                locations:!!node && state.existingInvokeLocations.has(node),
+                emitted:!!node && state.existingInvokeEmitted.has(node)};
+            });
+            const codegenProven=proofs.every(p => p.node && p.locations && p.emitted) &&
+              proofs[0].node !== proofs[1].node;
+            if (succeeded && codegenProven && fn !== null) {
               new NativeFunction(fn,'void',['int'])(1);
               send({type:'artwatch-p3-compiled',method:this.method,
-                codegenSuccess:true});
+                codegenSuccess:true,cloneProof:proofs});
             } else {
               send({type:'artwatch-p3-clone-error',method:this.method,
-                error:'compiler did not complete or event setter unavailable'});
+                error:'compiler completion, cloned invoke codegen, or event setter failed',
+                compilerSucceeded:succeeded,cloneProof:proofs});
             }
           }
           if (state && state.existingInvokeVisits > 0) {
@@ -1362,17 +1371,25 @@ function attachP3CloneCanary(compiler) {
           attempts++;
           cloning=true;
           try {
+            const cloneOut=Memory.alloc(size);
+            cloneOut.writePointer(ptr(0));
             const rc=shadowShim.cloneBefore(node,
               fieldVt.address,invokeVt.address,
               fieldPc,invokePc,insert.address,copyEnv.address,
-              isWrite?2:1);
+              isWrite?2:1,cloneOut);
+            const cloned=rc===1 ? cloneOut.readPointer() : ptr(0);
             send({type:'artwatch-p3-clone',rc,method:active.method,
               kind,attempt:attempts,trigger:'invoke_accept',
+              clonedNode:cloned.isNull()?null:cloned.toString(),
               fieldDexPc:fieldPc,invokeDexPc:invokePc});
-            if (rc===1) {
+            if (rc===1 && !cloned.isNull()) {
+              state.p3ClonedNodes.set(kind,cloned.toString());
               if (successfulMethod===null) successfulMethod=active.method;
               successfulKinds.add(kind);
               if (successfulKinds.size===2) p3PendingMethod=active.method;
+            } else if (rc===1) {
+              send({type:'artwatch-p3-clone-error',method:active.method,
+                error:'native insertion returned success without a clone identity'});
             }
           } finally {cloning=false;}
         } catch(e) {

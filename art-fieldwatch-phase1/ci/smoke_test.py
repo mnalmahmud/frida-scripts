@@ -158,6 +158,38 @@ def main():
                     payloads.append(m['payload'])
             except (ValueError, TypeError):
                 continue
+        # P3 must prove the exact two native-cloned invoke nodes reached
+        # BOTH location assignment and code emission in one compilation.
+        # Counts and fixture assertions alone are not clone provenance.
+        p3_clones = [v for v in payloads if v.get('type') == 'artwatch-p3-clone']
+        p3_compiled = [v for v in payloads if v.get('type') == 'artwatch-p3-compiled']
+        p3_errors = [v for v in payloads if v.get('type') == 'artwatch-p3-clone-error']
+        if p3_inject:
+            attached = [v for v in payloads if v.get('type') == 'artwatch-hook-attached'
+                        and v.get('layer') == 'p3_clone_canary']
+            successful = [v for v in p3_clones if v.get('rc') == 1]
+            if not attached or p3_errors or len(successful) != 2:
+                raise AssertionError(f'P3 clone hook/errors/attempts invalid: '
+                                     f'{len(attached)}, {p3_errors}, {p3_clones}')
+            nodes = {v.get('clonedNode') for v in successful}
+            if {v.get('kind') for v in successful} != {'write','read'} or (
+                 None in nodes or len(nodes) != 2):
+                raise AssertionError(f'P3 did not return two distinct typed clone nodes: {successful}')
+            if len(p3_compiled) != 1 or p3_compiled[0].get('codegenSuccess') is not True:
+                raise AssertionError(f'P3 compiler completion not proven: {p3_compiled}')
+            proof = p3_compiled[0].get('cloneProof', [])
+            if (len(proof) != 2 or {v.get('node') for v in proof} != nodes or
+                {v.get('kind') for v in proof} != {'write','read'} or
+                not all(v.get('locations') is True and v.get('emitted') is True
+                        for v in proof)):
+                raise AssertionError(f'P3 exact clone nodes missing from backend: {proof}')
+            if any(v.get('method') != p3_compiled[0].get('method')
+                   for v in successful):
+                raise AssertionError('P3 cloned invokes came from different JIT methods')
+            record('host','PASS: P3 write/read clone IDs reached location assignment '
+                   'and code emission in the successful ART compilation')
+        elif p3_clones or p3_compiled or p3_errors:
+            raise AssertionError('P3 mutation occurred while opt-in is disabled')
         # Source-backed ABI oracle: compiler-created HInvokeStaticOrDirect
         # nodes must be observed, not merely a successfully hooked export.
         # This remains passive and does not imply an injected invoke.

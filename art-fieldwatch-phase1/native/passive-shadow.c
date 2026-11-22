@@ -360,7 +360,9 @@ EXPORT int artwatch_shadow_clone_invoke_before(
     const void *source, const void *get_vtable, const void *invoke_vtable,
     uint32_t expected_get_pc, uint32_t expected_invoke_pc,
     const void *insert_address, const void *copy_env_address,
-    int field_kind) {
+    int field_kind, void **out_clone) {
+  if (out_clone==NULL || !aligned(out_clone)) return -1;
+  *out_clone=NULL;
   if ((field_kind!=1 && field_kind!=2) || ready != 1 || !aligned(source) || !aligned(get_vtable) ||
       !aligned(invoke_vtable) || !aligned(insert_address) ||
       !aligned(copy_env_address)) return -1;
@@ -467,8 +469,11 @@ EXPORT int artwatch_shadow_clone_invoke_before(
   memcpy(&copy_block,(const uint8_t*)copy+24,8);
   memcpy(&copy_next,(const uint8_t*)copy+16,8);
   memcpy(&copy_env,(const uint8_t*)copy+64,8);
-  return copy_block==block && copy_next==source && copy_env==environment ?
-      1 : -12;
+  if (copy_block==block && copy_next==source && copy_env==environment) {
+    *out_clone=copy;
+    return 1;
+  }
+  return -12;
 }
 // Writes only into the caller's scratch buffer, never to ART memory.
 EXPORT int artwatch_shadow_report(char *out, uint32_t length) {
