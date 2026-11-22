@@ -82,11 +82,33 @@ public final class FieldIRTarget {
     return observed;
   }
 
-  public static int exerciseP3TemplateCarrier() {
+  public static int exerciseP3TemplateCarrier(boolean requireInjection)
+      throws InterruptedException {
     FieldIRTarget target = new FieldIRTarget();
     for (int i = 0; i < 100000; i++) {
       if (p3TemplateCarrierOn(target, i) != i)
         throw new AssertionError("P3 template warmup mismatch: " + i);
+    }
+    if (requireInjection) {
+      // JIT compilation is asynchronous. In prior CI the 128 reads ran at
+      // 09:18:32 while ART didn't insert the invoke until 09:18:34.
+      // Keep the call hot until the *successful compiler completion*
+      // signal, then allow the runtime to publish the JIT code.
+      long deadline = System.nanoTime() + 15_000_000_000L;
+      while (!FieldEventSink.p3Enabled()) {
+        for (int i = 0; i < 1000; i++) {
+          if (p3TemplateCarrierOn(target, i) != i)
+            throw new AssertionError("P3 asynchronous warmup mismatch");
+        }
+        if (System.nanoTime() >= deadline)
+          throw new AssertionError("P3 compiler injection was not activated");
+        Thread.sleep(20);
+      }
+      Thread.sleep(200);
+      for (int i = 0; i < 2000; i++) {
+        if (p3TemplateCarrierOn(target, i) != i)
+          throw new AssertionError("P3 published JIT mismatch");
+      }
     }
     FieldEventSink.reset();
     int checksum = 0;
@@ -101,8 +123,8 @@ public final class FieldIRTarget {
     try { p3TemplateCarrierOn(null, 777); }
     catch (NullPointerException expected) { threw = true; }
     if (!threw) throw new AssertionError("P3 template null write did not throw");
-    if (FieldEventSink.p3Enabled()) {
-      if (!FieldEventSink.p3Verified())
+    if (requireInjection) {
+      if (!FieldEventSink.p3Enabled() || !FieldEventSink.p3Verified())
         throw new AssertionError("Compiler-cloned P3 reads missing or incorrect");
     } else if (FieldEventSink.eventCount() != 0) {
       throw new AssertionError("P3 template polluted the event stream");

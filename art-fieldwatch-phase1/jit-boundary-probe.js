@@ -66,6 +66,7 @@ const INVOKE_BACKEND_EMISSION =
   '_ZN3art6x86_6430InstructionCodeGeneratorX86_6425VisitInvokeStaticOrDirectEPNS_21HInvokeStaticOrDirectE';
 const MAX_EXISTING_INVOKES = 80;
 let existingInvokeCount = 0;
+let p3PendingMethod = null;
 const targetDexByMethod = new Map();
 let backendVisitOrdinal = 0;
 const BACKEND_VISIT_LIMIT = 160;
@@ -281,6 +282,20 @@ function attach(layer, site) {
       onLeave(ret) {
         if (layer === 'compiler') {
           const state = targetStates.get(this.nativeThread);
+          if (p3PendingMethod === this.method) {
+            const succeeded = ret.toInt32() !== 0;
+            p3PendingMethod = null;
+            const module = Process.findModuleByName('libartwatch_events.so');
+            const fn = module && module.findExportByName('artwatch_events_set_p3');
+            if (succeeded && fn !== null) {
+              new NativeFunction(fn,'void',['int'])(1);
+              send({type:'artwatch-p3-compiled',method:this.method,
+                codegenSuccess:true});
+            } else {
+              send({type:'artwatch-p3-clone-error',method:this.method,
+                error:'compiler did not complete or event setter unavailable'});
+            }
+          }
           if (state && state.existingInvokeVisits > 0) {
             send({type:'artwatch-existing-invoke-summary',
               method:this.method,compilationKind:this.compilationKind,
@@ -1338,10 +1353,7 @@ function attachP3CloneCanary(compiler) {
               getDexPc:fixture.getDexPc,invokeDexPc:fixture.invokeDexPc});
             if (rc===1) {
               successes++;
-              const module=Process.findModuleByName('libartwatch_events.so');
-              const address=module && module.findExportByName('artwatch_events_set_p3');
-              if (address)
-                new NativeFunction(address,'void',['int'])(1);
+              p3PendingMethod = active.method;
             }
           } finally {cloning=false;}
         } catch(e) {

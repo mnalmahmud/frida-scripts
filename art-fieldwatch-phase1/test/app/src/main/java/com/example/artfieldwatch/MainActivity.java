@@ -50,7 +50,7 @@ public final class MainActivity extends Activity {
     // Executed from the real app worker; the host Frida client drains
     // the native records after this completion marker.
     if (android.os.Build.VERSION.SDK_INT == 33) {
-     int carrierChecksum = FieldIRTarget.exerciseP3TemplateCarrier();
+     int carrierChecksum = FieldIRTarget.exerciseP3TemplateCarrier(appDebuggable);
      Log.i("ARTWATCH_CI","P3_TEMPLATE_DONE count=" +
            FieldEventSink.eventCount() + " checksum=" +
            carrierChecksum + " nullCheck=true injected=" +
