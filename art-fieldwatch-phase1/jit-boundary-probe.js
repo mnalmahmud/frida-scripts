@@ -1281,40 +1281,39 @@ function attachP3CloneCanary(compiler) {
   const vt=getExport(compiler,INVOKE_VTABLE);
   const get=getExport(compiler,'_ZTVN3art17HInstanceFieldGetE');
   if (!append || !vt || !get) return false;
-  const seen=new Set();
   let inClone=false;
-  let eventEnable=null;
   let complete=0;
   try {
     Interceptor.attach(append.address,{
       onEnter(args) {
         this.candidate=null;
-        if (inClone || complete > 0) return;
+        if (inClone || complete>0) return;
         const active=compiling.get(this.threadId);
         if (!active || !targetMethodPointers.has(active.method)) return;
         if (!shadowShim) loadPassiveShadow();
         if (!shadowShim || !shadowShim.cloneTemplate ||
             !shadowShim.instructionDexPc) return;
-        const node=args[1];
+        this.candidate={builder:args[0],node:args[1],method:active.method};
+      },
+      onLeave() {
+        if (!this.candidate || inClone || complete>0) return;
+        const {builder,node,method}=this.candidate;
+        // At AppendInstruction *entry*, the node is unlinked and has no
+        // previous_ or block_. Only inspect its ownership AFTER ART's
+        // original append + InitializeInstruction completed.
         try {
           if (!node.readPointer().equals(vt.address.add(2*Process.pointerSize)))
             return;
-          const p=Memory.alloc(4);
-          if (shadowShim.instructionDexPc(node,vt.address,p)!==1 ||
-              p.readU32()!==fixture.invokeDexPc) return;
+          const pc=Memory.alloc(4);
+          if (shadowShim.instructionDexPc(node,vt.address,pc)!==1 ||
+              pc.readU32()!==fixture.invokeDexPc) return;
           const previous=node.add(Process.pointerSize).readPointer();
           if (previous.isNull() ||
               !previous.readPointer().equals(get.address.add(2*Process.pointerSize)))
             return;
-          if (shadowShim.instructionDexPc(previous,get.address,p)!==1 ||
-              p.readU32()!==fixture.getDexPc) return;
-          if (seen.has(active.method)) return;
-          this.candidate={builder:args[0],node,method:active.method};
-        } catch (_) {}
-      },
-      onLeave() {
-        if (!this.candidate || inClone) return;
-        const {builder,node,method}=this.candidate;
+          if (shadowShim.instructionDexPc(previous,get.address,pc)!==1 ||
+              pc.readU32()!==fixture.getDexPc) return;
+        } catch (_) {return;}
         inClone=true;
         try {
           const rc=shadowShim.cloneTemplate(builder,node,get.address,
@@ -1323,15 +1322,9 @@ function attachP3CloneCanary(compiler) {
             getDexPc:fixture.getDexPc,invokeDexPc:fixture.invokeDexPc});
           if (rc===1) {
             complete++;
-            seen.add(method);
-            if (eventEnable===null) {
-              const library=Process.findModuleByName('libartwatch_events.so');
-              if (library) {
-                const p=library.findExportByName('artwatch_events_set_p3');
-                if (p) eventEnable=new NativeFunction(p,'void',['int']);
-              }
-            }
-            if (eventEnable) eventEnable(1);
+            const library=Process.findModuleByName('libartwatch_events.so');
+            const address=library && library.findExportByName('artwatch_events_set_p3');
+            if (address) new NativeFunction(address,'void',['int'])(1);
           }
         } catch(e) {
           send({type:'artwatch-p3-clone-error',error:String(e)});
