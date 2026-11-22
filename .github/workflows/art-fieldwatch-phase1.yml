@@ -49,6 +49,7 @@ jobs:
       ARTWATCH_LOG_DIR: /tmp/artwatch-logs
       ARTWATCH_REQUIRE_JIT: '1'
       ARTWATCH_SHADOW_SHIM: ${{ matrix.api == 33 && '1' || '0' }}
+      ARTWATCH_P3_INJECT: ${{ matrix.api == 33 && matrix.variant == 'debug' && '1' || '0' }}
     steps:
       - uses: actions/checkout@v4
       # Emulator 37.3+ refuses -accel off without an explicit TCG override.
