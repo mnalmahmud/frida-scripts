@@ -86,7 +86,7 @@ def debug_lines(data, off):
         elif op in (3,4):
             count=4 if op==4 else 3
             for __ in range(count): _,off=uleb128(data,off)
-        elif op in (5,6,9):
+        elif op == 9:
             _,off=uleb128(data,off)
         elif op in (7,8): pass
         else:
@@ -212,10 +212,10 @@ def self_test():
     assert FIELD_OPS[0x5a]["valueKind"]=="wide"
     assert FIELD_OPS[0x60]["access"]=="static"
     assert FIELD_OPS[0x6d]=={"access":"static","operation":"write","valueKind":"short"}
-    assert insn_width(b"\\x52\\x00\\x03\\x00",0,0,2)==2
-    assert insn_width(b"\\x00\\x01\\x02\\x00"+b"\0"*12,0,0,8)==8
-    assert insn_width(b"\\x00\\x03\\x02\\x00\\x03\\x00\\x00\\x00"+b"\0"*4,0,0,6)==6
-    try: insn_width(b"\\x52\\x00",0,0,1)
+    assert insn_width(b"\x52\x00\x03\x00",0,0,2)==2
+    assert insn_width(b"\x00\x01\x02\x00"+b"\0"*12,0,0,8)==8
+    assert insn_width(b"\x00\x03\x02\x00\x03\x00\x00\x00"+b"\0"*4,0,0,6)==6
+    try: insn_width(b"\x52\x00",0,0,1)
     except ValueError: pass
     else: raise AssertionError("truncated field instruction accepted")
     print("dex_field_sites self-test OK")
