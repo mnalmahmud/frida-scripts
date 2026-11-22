@@ -175,7 +175,9 @@ function loadPassiveShadow() {
       scopeEnd: exported('artwatch_shadow_scope_end','int',['pointer','uint']),
       block: exported('artwatch_shadow_block','int',['pointer','pointer','pointer']),
       linkedGetInvoke: exported('artwatch_shadow_linked_get_invoke','int',
-        ['pointer','pointer','pointer','pointer'])
+        ['pointer','pointer','pointer','pointer']),
+      instructionDexPc: exported('artwatch_shadow_instruction_dex_pc','int',
+        ['pointer','pointer','pointer'])
     };
     send({type:'artwatch-shadow-init',ready:true,source:'native',
       buildIdVerified:true,mutable:false});
@@ -246,6 +248,8 @@ function attach(layer, site) {
             adjacencyWithin8: 0, adjacencyBlockMismatch: 0,
             adjacencyBrokenLinks: 0, adjacencyNoGetWithin8: 0,
             adjacencyPreviousSamples: [], targetAdjacencyProbes: 0,
+            targetGetPcMatches: 0, targetGetPcMismatches: 0,
+            targetGetPcUnavailable: 0,
             seenVisits: new Set(), seenKinds: new Set(), uniqueNodes: new Set(),
             visitsByPhase: {}, mutations: [], reported: 0,
             optimizationEntries: 0, lseInvocations: 0,
@@ -291,6 +295,9 @@ function attach(layer, site) {
               adjacencyPreviousSamples:state.adjacencyPreviousSamples,
               fieldTarget:targetMethodPointers.has(this.method),
               targetAdjacencyProbes:state.targetAdjacencyProbes,
+              targetGetPcMatches:state.targetGetPcMatches,
+              targetGetPcMismatches:state.targetGetPcMismatches,
+              targetGetPcUnavailable:state.targetGetPcUnavailable,
               emittedInvokeNodes:[...state.existingInvokeEmitted].slice(0,12),
               compilationSucceeded:ret.toInt32() !== 0});
           }
@@ -1160,11 +1167,43 @@ function attachExistingInvokeObserver(compiler) {
             case 'no-get': state.adjacencyNoGetWithin8++; break;
             default: state.adjacencyRejected++; break;
           }
-          if (seen.get && state.adjacencySamples.length < 12)
-            state.adjacencySamples.push({
-              get:seen.get,invoke:args[0].toString(),
-              block:matchesBlock ? scope.block : null,depth:seen.depth,
-              fieldTarget});
+          if (seen.get) {
+            // Match the get's actual live C++ DEX PC to the DEX-PC
+            // observed by HInstructionBuilder *for this ArtMethod*.
+            // This prevents mistaking another field get for the P3 template.
+            let getDexPc = null, invokeDexPc = null;
+            if (shadowShim.instructionDexPc) {
+              const p = Memory.alloc(4);
+              if (shadowShim.instructionDexPc(
+                    ptr(seen.get),getVtable.address,p) === 1)
+                getDexPc = p.readU32();
+              if (shadowShim.instructionDexPc(
+                    args[0],vt.address,p) === 1)
+                invokeDexPc = p.readU32();
+            }
+            let expectedField = null;
+            let pcMatch = false;
+            const known = targetDexByMethod.get(active.method);
+            if (known && getDexPc !== null) {
+              for (const [fieldIndex, field] of known) {
+                if (field.getPc === getDexPc) {
+                  expectedField = fieldIndex;
+                  pcMatch = true;
+                  break;
+                }
+              }
+            }
+            if (fieldTarget) {
+              if (pcMatch) state.targetGetPcMatches++;
+              else if (getDexPc === null || !known) state.targetGetPcUnavailable++;
+              else state.targetGetPcMismatches++;
+            }
+            if (state.adjacencySamples.length < 12)
+              state.adjacencySamples.push({
+                get:seen.get,invoke:args[0].toString(),
+                block:matchesBlock ? scope.block : null,depth:seen.depth,
+                fieldTarget,getDexPc,invokeDexPc,expectedField,pcMatch});
+          }
           if (state.adjacencyPreviousSamples.length < 12)
             state.adjacencyPreviousSamples.push({
               node:args[0].toString(),reason:seen.reason,
