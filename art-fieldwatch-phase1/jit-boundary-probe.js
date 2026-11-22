@@ -1312,6 +1312,7 @@ function attachP3CloneCanary(compiler) {
     return false;
   let cloning=false;
   const successfulKinds=new Set();
+  let successfulMethod=null;
   let attempts=0;
   let missedBuilder=0;
   try {
@@ -1321,7 +1322,8 @@ function attachP3CloneCanary(compiler) {
         const thread=this.threadId;
         const active=compiling.get(thread);
         const state=targetStates.get(thread);
-        if (!active || !state || !targetMethodPointers.has(active.method))
+        if (!active || !state || !targetMethodPointers.has(active.method) ||
+            (successfulMethod!==null && successfulMethod!==active.method))
           return;
         if (!shadowShim) loadPassiveShadow();
         if (!shadowShim || !shadowShim.cloneBefore ||
@@ -1342,12 +1344,18 @@ function attachP3CloneCanary(compiler) {
           if (successfulKinds.has(kind)) return;
           const fieldVt=isWrite?setVt:getVt;
           const fieldPc=isWrite?fixture.setDexPc:fixture.getDexPc;
-          const previous=node.add(size).readPointer();
-          if (previous.isNull() ||
-              !previous.readPointer().equals(fieldVt.address.add(2*size)))
-            return;
-          if (shadowShim.instructionDexPc(previous,fieldVt.address,pc)!==1 ||
-              pc.readU32()!==fieldPc) return;
+          if (isRead) {
+            // Read case remains the verified adjacent get -> invoke path.
+            const previous=node.add(size).readPointer();
+            if (previous.isNull() ||
+                !previous.readPointer().equals(fieldVt.address.add(2*size)))
+              return;
+            if (shadowShim.instructionDexPc(previous,fieldVt.address,pc)!==1 ||
+                pc.readU32()!==fieldPc) return;
+          }
+          // For stores, ART can insert an HIntConstant between iput and
+          // invoke. The build-ID-gated native routine walks and verifies
+          // up to eight reciprocal links in the same HBasicBlock.
           // Same-graph clone immediately before original invoke.
           // No HInstructionBuilder state is required, so this also works
           // when ART inlines AppendInstruction.
@@ -1362,6 +1370,7 @@ function attachP3CloneCanary(compiler) {
               kind,attempt:attempts,trigger:'invoke_accept',
               fieldDexPc:fieldPc,invokeDexPc:invokePc});
             if (rc===1) {
+              if (successfulMethod===null) successfulMethod=active.method;
               successfulKinds.add(kind);
               if (successfulKinds.size===2) p3PendingMethod=active.method;
             }

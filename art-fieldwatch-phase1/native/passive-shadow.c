@@ -380,7 +380,7 @@ EXPORT int artwatch_shadow_clone_invoke_before(
         strcmp(info.dli_sname,syms[n].name)!=0) return -2;
   }
   const uint8_t *src=(const uint8_t*)source;
-  const void *vptr=NULL,*get=NULL,*block=NULL,*get_vptr=NULL;
+  const void *vptr=NULL,*get=NULL,*block=NULL;
   uint32_t get_pc=UINT32_MAX,invoke_pc=UINT32_MAX;
   memcpy(&vptr,src,sizeof(vptr));
   memcpy(&get,src+8,sizeof(get));
@@ -388,14 +388,30 @@ EXPORT int artwatch_shadow_clone_invoke_before(
   memcpy(&invoke_pc,src+32,sizeof(invoke_pc));
   if (vptr!=(const uint8_t*)invoke_vtable+16 || !aligned(get) ||
       !aligned(block) || invoke_pc!=expected_invoke_pc) return -3;
-  memcpy(&get_vptr,get,sizeof(get_vptr));
-  memcpy(&get_pc,(const uint8_t*)get+32,sizeof(get_pc));
-  if (get_vptr!=(const uint8_t*)get_vtable+16 ||
-      get_pc!=expected_get_pc) return -4;
-  const void *get_next=NULL,*get_block=NULL;
-  memcpy(&get_next,(const uint8_t*)get+16,sizeof(get_next));
-  memcpy(&get_block,(const uint8_t*)get+24,sizeof(get_block));
-  if (get_next!=source || get_block!=block) return -5;
+  // A write may have compiler-generated HIntConstant nodes between
+  // iput and the resolved sink invoke. Follow at most eight reciprocal
+  // same-block links for writes; keep the proved direct-read path.
+  const void *cursor=source;
+  const void *field=NULL;
+  const unsigned limit=field_kind==2 ? 8u : 1u;
+  for (unsigned n=0;n<limit;n++) {
+    const void *prior=NULL,*next=NULL,*prior_block=NULL,*vt=NULL;
+    memcpy(&prior,(const uint8_t*)cursor+8,8);
+    if (!aligned(prior)) return -4;
+    memcpy(&next,(const uint8_t*)prior+16,8);
+    memcpy(&prior_block,(const uint8_t*)prior+24,8);
+    if (next!=cursor || prior_block!=block) return -5;
+    memcpy(&vt,prior,8);
+    if (vt==(const uint8_t*)get_vtable+16) {
+      memcpy(&get_pc,(const uint8_t*)prior+32,4);
+      if (get_pc==expected_get_pc) {
+        field=prior;
+        break;
+      }
+    }
+    cursor=prior;
+  }
+  if (field==NULL) return -4;
 
   // Verify source environment is uninlined, has a populated vector of
   // (instruction, before-use-node) records, and no allocated locations yet.
