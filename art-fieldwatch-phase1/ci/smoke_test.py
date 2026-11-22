@@ -41,8 +41,11 @@ def main():
             sink_info = json.loads(sink_inventory.read_text())
             if sink_info.get('dex') != 'classes.dex':
                 raise AssertionError('P3 probe currently supports the primary DEX only')
-            source = ('globalThis.__artwatchSinkMethodIndex = ' +
-                      json.dumps(sink_info['methodIndex']) + ';\n' + source)
+            source = ('globalThis.__artwatchP3Fixture = ' +
+                      json.dumps(sink_info) + ';\n' +
+                      'globalThis.__artwatchP3Inject = ' +
+                      json.dumps(os.environ.get('ARTWATCH_P3_INJECT') == '1') +
+                      ';\n' + source)
         if os.environ.get('ARTWATCH_SHADOW_SHIM') == '1':
             source = ('globalThis.__artwatchShadowPath = ' +
                       json.dumps('libartwatch_shadow.so') +
@@ -81,9 +84,13 @@ def main():
         if 'SHADOW_LIB_LOADED=true' not in logs.stdout or (
              'EVENT_LIB_LOADED=true' not in logs.stdout):
             raise AssertionError('App failed to load packaged native observer/event libraries')
-        template_marker = 'P3_TEMPLATE_DONE count=0 checksum=25280 nullCheck=true'
+        p3_inject = os.environ.get('ARTWATCH_P3_INJECT') == '1'
+        if p3_inject:
+            template_marker = 'P3_TEMPLATE_DONE count=128 checksum=25280 nullCheck=true injected=true'
+        else:
+            template_marker = 'P3_TEMPLATE_DONE count=0 checksum=25280 nullCheck=true injected=false'
         if template_marker not in logs.stdout:
-            raise AssertionError('Resolved P3 invoke template did not run with zero events')
+            raise AssertionError('P3 compiler-insertion result mismatch: ' + template_marker)
         if logs.stdout.index(template_marker) >= logs.stdout.find('P3_CANARY_DONE'):
             raise AssertionError('P3 template did not run before the silent canary')
         canary_marker = 'P3_CANARY_DONE count=0 checksum=25280 nullCheck=true'
