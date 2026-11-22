@@ -34,6 +34,15 @@ def main():
     runtime_snapshot = None
     try:
         source = (BASE/'jit-boundary-probe.js').read_text()
+        sink_inventory = LOG_DIR / ('p3-sink-method-' +
+                                     os.environ.get('ARTWATCH_BUILD_VARIANT','debug') +
+                                     '.json')
+        if sink_inventory.is_file() and os.environ.get('ARTWATCH_SHADOW_SHIM') == '1':
+            sink_info = json.loads(sink_inventory.read_text())
+            if sink_info.get('dex') != 'classes.dex':
+                raise AssertionError('P3 probe currently supports the primary DEX only')
+            source = ('globalThis.__artwatchSinkMethodIndex = ' +
+                      json.dumps(sink_info['methodIndex']) + ';\\n' + source)
         if os.environ.get('ARTWATCH_SHADOW_SHIM') == '1':
             source = ('globalThis.__artwatchShadowPath = ' +
                       json.dumps('libartwatch_shadow.so') +
