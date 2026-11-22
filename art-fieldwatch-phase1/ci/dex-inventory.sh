@@ -10,6 +10,10 @@ out="${ARTWATCH_LOG_DIR:-/tmp/artwatch-logs}"
 mkdir -p "$out"
 echo "variant=$variant apk=$apk"
 unzip -p "$apk" classes.dex | sha256sum | tee "$out/dex-sha256-$variant.txt"
+# Preserve the exact method_ids[] index of the real native sink in the
+# packaged DEX (it can change across debug/release, or between builds).
+python3 art-fieldwatch-phase1/ci/dex_method_index.py "$apk" |
+  tee "$out/p3-sink-method-$variant.json"
 analyzer="${ANDROID_HOME:-}/cmdline-tools/latest/bin/apkanalyzer"
 if [[ ! -x "$analyzer" ]]; then
   analyzer="$(command -v apkanalyzer || true)"
