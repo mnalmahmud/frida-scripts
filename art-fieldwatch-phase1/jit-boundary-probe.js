@@ -179,7 +179,7 @@ function loadPassiveShadow() {
       instructionDexPc: exported('artwatch_shadow_instruction_dex_pc','int',
         ['pointer','pointer','pointer']),
       cloneTemplate: exported('artwatch_shadow_clone_template_invoke','int',
-        ['pointer','pointer','pointer','pointer','uint','uint'])
+        ['pointer','pointer','pointer','pointer','uint','uint','pointer'])
     };
     send({type:'artwatch-shadow-init',ready:true,source:'native',
       buildIdVerified:true,mutable:false});
@@ -1318,7 +1318,7 @@ function attachP3CloneCanary(compiler) {
         inClone=true;
         try {
           const rc=shadowShim.cloneTemplate(builder,node,get.address,
-            vt.address,fixture.getDexPc,fixture.invokeDexPc);
+            vt.address,fixture.getDexPc,fixture.invokeDexPc,append.address);
           send({type:'artwatch-p3-clone',rc,method,
             getDexPc:fixture.getDexPc,invokeDexPc:fixture.invokeDexPc});
           if (rc===1) {
