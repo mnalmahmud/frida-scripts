@@ -105,6 +105,82 @@ def sink_method_index(data):
     return found[0]
 
 
+def canary_pcs(data, sink_idx):
+    """Return exact code-unit PCs for one iget and sink invoke in carrier."""
+    types_count, types_off = u32(data, 0x40), u32(data, 0x44)
+    strings_count, strings_off = u32(data, 0x38), u32(data, 0x3c)
+    methods_off = u32(data, 0x5c)
+    classes_count, classes_off = u32(data, 0x60), u32(data, 0x64)
+
+    def string(idx):
+        if idx >= strings_count:
+            raise ValueError("bad string ID")
+        off = u32(data, strings_off + 4 * idx)
+        _, pos = uleb128(data, off)
+        end = data.find(b"\\0", pos)
+        if end < 0:
+            raise ValueError("bad string terminator")
+        return data[pos:end].decode("ascii")
+
+    def descriptor(idx):
+        if idx >= types_count:
+            raise ValueError("bad type ID")
+        return string(u32(data, types_off + 4 * idx))
+
+    target = "Lcom/example/artfieldwatch/FieldIRTarget;"
+    found = []
+    for j in range(classes_count):
+        pos = classes_off + 32 * j
+        if descriptor(u32(data, pos)) != target:
+            continue
+        off = u32(data, pos + 24)
+        if off == 0:
+            raise ValueError("missing field target class data")
+        counts = []
+        for _ in range(4):
+            n, off = uleb128(data, off)
+            counts.append(n)
+        if any(n > len(data) for n in counts):
+            raise ValueError("invalid class member count")
+        for _ in range(counts[0] + counts[1]):
+            _, off = uleb128(data, off)
+            _, off = uleb128(data, off)
+        for group, n in enumerate(counts[2:]):
+            method_index = 0
+            for _ in range(n):
+                diff, off = uleb128(data, off)
+                method_index += diff
+                _, off = uleb128(data, off)
+                code_off, off = uleb128(data, off)
+                name_idx = u32(data, methods_off + method_index * 8 + 4)
+                if string(name_idx) != "p3TemplateCarrierOn":
+                    continue
+                if code_off == 0:
+                    raise ValueError("P3 carrier has no DEX code")
+                insn_count = u32(data, code_off + 12)
+                insns_start = code_off + 16
+                if insn_count > len(data) // 2 or insns_start + 2*insn_count > len(data):
+                    raise ValueError("invalid P3 carrier code bounds")
+                candidates_get = []
+                candidates_invoke = []
+                for pc in range(insn_count):
+                    op = u16(data, insns_start + pc*2) & 0xff
+                    if op == 0x52:
+                        candidates_get.append(pc)
+                    if op in (0x71, 0x77) and pc+1 < insn_count:
+                        method_id = u16(data, insns_start+(pc+1)*2)
+                        if method_id == sink_idx:
+                            candidates_invoke.append(pc)
+                if len(candidates_get) != 1 or len(candidates_invoke) != 1:
+                    raise ValueError(f"ambiguous P3 opcodes: gets={candidates_get} invokes={candidates_invoke}")
+                found.append({"carrierMethodIndex":method_index,
+                              "getDexPc":candidates_get[0],
+                              "invokeDexPc":candidates_invoke[0]})
+    if len(found) != 1:
+        raise ValueError(f"expected one P3 carrier method, found {len(found)}")
+    return found[0]
+
+
 def apk_sink_method(apk):
     with zipfile.ZipFile(apk) as archive:
         dex_names = sorted(x for x in archive.namelist()
@@ -120,7 +196,9 @@ def apk_sink_method(apk):
                 if "expected one sink DEX method ID, found 0" in str(e):
                     continue
                 raise
+            pcs = canary_pcs(data, idx)
             matches.append({"dex": name, "methodIndex": idx,
+                            **pcs,
                             "sha256": hashlib.sha256(data).hexdigest()})
         if len(matches) != 1:
             raise ValueError(f"expected one fixture sink in APK, found {len(matches)}")
