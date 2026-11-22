@@ -1360,7 +1360,7 @@ function attachP3CloneCanary(compiler) {
               isWrite?2:1);
             send({type:'artwatch-p3-clone',rc,method:active.method,
               kind,attempt:attempts,trigger:'invoke_accept',
-              fieldDexPc:fieldPc,invokeDexPc});
+              fieldDexPc:fieldPc,invokeDexPc:invokePc});
             if (rc===1) {
               successfulKinds.add(kind);
               if (successfulKinds.size===2) p3PendingMethod=active.method;
