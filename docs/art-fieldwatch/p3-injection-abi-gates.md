@@ -204,3 +204,55 @@ No ART memory is modified. A passing API33 JIT must not have negative
 identity checks; actual adjacency has to be observed before deploying the
 `CloneUniqueIntReadInGraph` logic. A zero adjacency count is meaningful
 and must not be relabeled as successful injection.
+
+
+## 2026-11-22: baseline field-target scan and DEX PC identity
+
+The passed API 33 [CI run 44939983872](https://github.com/mnalmahmud/frida-scripts/actions/runs/44939983872)
+demonstrated that the earlier **zero adjacency probes** were caused by the
+`RunOptimizations()`-only visitor gate. After observing baseline compilation,
+the debug/release logs showed respectively:
+
+| Signal | API 33 debug | API 33 release |
+| --- | ---: | ---: |
+| Invoke predecessor attempts | 64 | 301 |
+| Field-target attempts | 28 | 279 |
+| Immediate HInstanceFieldGet predecessor matches | 6 | 6 |
+| Field gets within eight predecessors | 2 | 2 |
+| Rejected or broken pointer identities | 0 | 0 |
+
+These represent observer *visits*, not deduplicated nodes or proof that the
+candidate invoke is `FieldEventSink.recordInt()`. Repeated visits to the
+same invoke can account for several matches. They establish only that
+some live get/invoke pairs share a block and linked-list adjacency.
+
+The next strict **read-only** predicate has been committed:
+
+- Native `artwatch_shadow_instruction_dex_pc` reads `dex_pc_` at the
+  Android 13 x86_64 `HInstruction` source-layout offset, only after exact
+  runtime/compiler Build-ID verification and vtable validation.
+- The JS invoke-predecessor walker compares the live field-get DEX PC to
+  `HInstructionBuilder::BuildInstanceFieldAccess` events from the same
+  `ArtMethod*` (including the DEX field index associated with the observed
+  get PC).
+- CI requires a nonzero matched count and checks accounting of matched,
+  unmatched, and unavailable candidates. No graph memory is modified.
+
+**Still necessary before enabling `CloneUniqueIntReadInGraph`:**
+
+1. Verify a *unique* template in the same live graph, with exact sink
+   `MethodReference` (DEX-file pointer and method index) and expected
+   resolved `ArtMethod*`. Invoke adjacency and field-get DEX PC alone
+   do not establish this identity.
+2. Prove all three actual invoke operands are int32 and carry
+   `(0,0,field_get)`; verify the `HEnvironment`, class-init state,
+   and dispatch metadata. Invoke::Accept does not expose this tuple.
+3. Build the ART C++ mutator against the *exact* matching ART source
+   revision and test in the compiler context. The existing CI does not
+   compile `p3-clone-injector-art.cc` and cannot claim successful IR
+   insertion or new runtime read events.
+4. Do not interpret repeated visitor observations as distinct field
+   accesses or instrumentation coverage.
+
+The new DEX-PC assertions are experimental; a green result is necessary,
+not sufficient, for graph mutation.
