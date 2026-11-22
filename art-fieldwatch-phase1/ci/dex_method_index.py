@@ -196,7 +196,12 @@ def apk_sink_method(apk):
                 if "expected one sink DEX method ID, found 0" in str(e):
                     continue
                 raise
-            pcs = canary_pcs(data, idx)
+            try:
+                pcs = canary_pcs(data, idx)
+            except ValueError as e:
+                if "expected one P3 carrier method, found 0" in str(e):
+                    continue
+                raise
             matches.append({"dex": name, "methodIndex": idx,
                             **pcs,
                             "sha256": hashlib.sha256(data).hexdigest()})
