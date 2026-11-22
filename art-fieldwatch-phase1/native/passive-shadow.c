@@ -274,7 +274,8 @@ EXPORT int artwatch_shadow_instruction_dex_pc(
 EXPORT int artwatch_shadow_clone_template_invoke(
     void *builder, const void *source,
     const void *get_vtable, const void *invoke_vtable,
-    uint32_t expected_get_pc, uint32_t expected_invoke_pc) {
+    uint32_t expected_get_pc, uint32_t expected_invoke_pc,
+    const void *append_address) {
   if (ready != 1 || !aligned(builder) || !aligned(source) ||
       !aligned(get_vtable) || !aligned(invoke_vtable)) return -1;
   Dl_info iv = {0}, gv = {0};
@@ -316,19 +317,21 @@ EXPORT int artwatch_shadow_clone_template_invoke(
   Dl_info ci={0};
   if (!aligned(clone_entry) || !dladdr(clone_entry,&ci) ||
       !named(ci.dli_fname,"libart-compiler.so")) return -7;
-  void *h=dlopen("libart-compiler.so",RTLD_NOW|RTLD_NOLOAD);
-  if (h==NULL) return -8;
-  void (*append)(void*,void*)=(void(*)(void*,void*))dlsym(
-       h,"_ZN3art19HInstructionBuilder17AppendInstructionEPNS_12HInstructionE");
-  if (append==NULL) { dlclose(h); return -8; }
+  // Resolve the already-observed exported compiler method in Frida's
+  // namespace and pass its exact address: app JNI namespaces cannot assume
+  // dlopen("libart-compiler.so") is permitted by Android's linker policy.
+  Dl_info ai={0};
+  if (!aligned(append_address) || !dladdr(append_address,&ai) ||
+      !named(ai.dli_fname,"libart-compiler.so") ||
+      ai.dli_sname==NULL ||
+      strcmp(ai.dli_sname,
+        "_ZN3art19HInstructionBuilder17AppendInstructionEPNS_12HInstructionE"))
+    return -8;
   typedef void *(*CloneFn)(const void*,void*);
   void *copy=((CloneFn)clone_entry)(source,(void*)arena);
-  if (!aligned(copy)) {dlclose(h); return -9;}
-  // AppendInstruction both inserts through HBasicBlock::AddInstruction
-  // and calls HInstructionBuilder::InitializeInstruction() so an invoke
-  // gets a compiler-built environment, rather than a copied/stale one.
-  append(builder,copy);
-  dlclose(h);
+  if (!aligned(copy)) return -9;
+  // ART's own AppendInstruction maintains SSA uses and environment state.
+  ((void (*)(void*,void*))append_address)(builder,copy);
   const void *copy_block=NULL,*copy_prev=NULL;
   memcpy(&copy_block,(const uint8_t*)copy+3*sizeof(void*),sizeof(copy_block));
   memcpy(&copy_prev,(const uint8_t*)copy+sizeof(void*),sizeof(copy_prev));
