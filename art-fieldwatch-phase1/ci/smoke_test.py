@@ -207,6 +207,22 @@ def main():
                    f'compilations={len(field_target_summaries)}')
             if not field_target_summaries or field_target_probes == 0:
                 raise AssertionError('No baseline field-target invoke predecessor scans')
+            matched_get_pcs = sum(v.get('targetGetPcMatches',0)
+                                  for v in field_target_summaries)
+            unmatched_get_pcs = sum(v.get('targetGetPcMismatches',0)
+                                    for v in field_target_summaries)
+            unavailable_get_pcs = sum(v.get('targetGetPcUnavailable',0)
+                                      for v in field_target_summaries)
+            target_gets_found = sum(
+                v.get('adjacencyMatches',0) + v.get('adjacencyWithin8',0)
+                for v in field_target_summaries)
+            record('host',f'P3 target get identity: matched={matched_get_pcs} '
+                   f'unmatched={unmatched_get_pcs} unavailable={unavailable_get_pcs} '
+                   f'adjacent-or-nearby={target_gets_found}')
+            if (matched_get_pcs + unmatched_get_pcs + unavailable_get_pcs != target_gets_found:
+                raise AssertionError('Inconsistent P3 get DEX-PC identity counters')
+            if matched_get_pcs == 0:
+                raise AssertionError('No live field-get DEX PC matched a field-builder target')
         record('host',f'Invoke x64 backend: code-emission nodes=' +
                str(sum(v.get('backendEmitted',0) for v in invoke_summaries)))
         record('host',f'Existing invoke ABI: samples={len(invoke_samples)} '
