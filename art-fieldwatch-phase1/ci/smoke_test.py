@@ -219,7 +219,7 @@ def main():
             record('host',f'P3 target get identity: matched={matched_get_pcs} '
                    f'unmatched={unmatched_get_pcs} unavailable={unavailable_get_pcs} '
                    f'adjacent-or-nearby={target_gets_found}')
-            if (matched_get_pcs + unmatched_get_pcs + unavailable_get_pcs != target_gets_found:
+            if matched_get_pcs + unmatched_get_pcs + unavailable_get_pcs != target_gets_found:
                 raise AssertionError('Inconsistent P3 get DEX-PC identity counters')
             if matched_get_pcs == 0:
                 raise AssertionError('No live field-get DEX PC matched a field-builder target')
