@@ -51,8 +51,10 @@ public final class MainActivity extends Activity {
     // the native records after this completion marker.
     if (android.os.Build.VERSION.SDK_INT == 33) {
      int carrierChecksum = FieldIRTarget.exerciseP3TemplateCarrier();
-     Log.i("ARTWATCH_CI","P3_TEMPLATE_DONE count=0 checksum=" +
-           carrierChecksum + " nullCheck=true");
+     Log.i("ARTWATCH_CI","P3_TEMPLATE_DONE count=" +
+           FieldEventSink.eventCount() + " checksum=" +
+           carrierChecksum + " nullCheck=true injected=" +
+           FieldEventSink.p3Enabled());
      accumulator += carrierChecksum;
      int canaryChecksum = FieldIRTarget.exerciseP3UninstrumentedCanary();
      Log.i("ARTWATCH_CI","P3_CANARY_DONE count=0 checksum=" +

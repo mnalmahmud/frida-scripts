@@ -19,6 +19,31 @@ static struct field_event events[EVENT_CAPACITY];
 static atomic_uint ready[EVENT_CAPACITY];
 static atomic_uint next_index = 0;
 static atomic_uint dropped = 0;
+static atomic_uint p3_enabled = 0;
+static atomic_uint p3_sentinel_sequence = 0;
+// Only the controlled fixture sets P3; ordinary P2 events are unchanged.
+EVENT_EXPORT void artwatch_events_set_p3(int enabled) {
+  atomic_store_explicit(&p3_enabled, enabled ? 1u : 0u, memory_order_release);
+}
+JNIEXPORT jboolean JNICALL
+Java_com_example_artfieldwatch_FieldEventSink_p3Enabled(JNIEnv *env,jclass cls) {
+  (void)env; (void)cls;
+  return atomic_load_explicit(&p3_enabled,memory_order_acquire) ? JNI_TRUE : JNI_FALSE;
+}
+JNIEXPORT jboolean JNICALL
+Java_com_example_artfieldwatch_FieldEventSink_p3Verified(JNIEnv *env,jclass cls) {
+  (void)env; (void)cls;
+  if (atomic_load_explicit(&next_index,memory_order_acquire)!=128u ||
+      atomic_load_explicit(&dropped,memory_order_acquire)!=0u)
+    return JNI_FALSE;
+  for (uint32_t i=0;i<128u;++i) {
+    if (atomic_load_explicit(&ready[i],memory_order_acquire)!=1u ||
+        events[i].site!=9002u || events[i].kind!=1u ||
+        events[i].value!=(int32_t)(7u+3u*i))
+      return JNI_FALSE;
+  }
+  return JNI_TRUE;
+}
 
 // Only the single-purpose CI producer may call reset, after warmup
 // finishes and before the measured 128 invocations. Not safe to reset
@@ -26,6 +51,7 @@ static atomic_uint dropped = 0;
 static void clear_events(void) {
   atomic_store_explicit(&next_index, 0, memory_order_relaxed);
   atomic_store_explicit(&dropped, 0, memory_order_relaxed);
+  atomic_store_explicit(&p3_sentinel_sequence, 0, memory_order_relaxed);
   for (uint32_t i = 0; i < EVENT_CAPACITY; ++i)
     atomic_store_explicit(&ready[i], 0, memory_order_relaxed);
 }
@@ -42,7 +68,15 @@ Java_com_example_artfieldwatch_FieldEventSink_recordInt(
   (void)cls;
   // Keep a real, resolved invoke in the P3 template carrier without
   // counting the deliberately inactive site/kind (0,0) as a field event.
-  if (site == 0 && kind == 0) return;
+  if (site == 0 && kind == 0) {
+    if (!atomic_load_explicit(&p3_enabled,memory_order_acquire)) return;
+    // One original Java call and one compiler-cloned call per invocation.
+    // Counting every second sentinel deliberately fails when no clone ran.
+    uint32_t n=atomic_fetch_add_explicit(&p3_sentinel_sequence,1u,
+                                         memory_order_relaxed);
+    if ((n & 1u)==0u) return;
+    site=9002; kind=1;
+  }
   uint32_t index = atomic_fetch_add_explicit(&next_index, 1u,
                                              memory_order_relaxed);
   if (index >= EVENT_CAPACITY) {

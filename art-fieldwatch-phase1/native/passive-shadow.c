@@ -256,6 +256,84 @@ EXPORT int artwatch_shadow_instruction_dex_pc(
   *out_dex_pc = dex_pc;
   return 1;
 }
+
+/*
+ * P3 opt-in experimental mutation, API33 x86_64 and exact ART build IDs.
+ * This first canary clones an existing *resolved* JNI invoke with identical
+ * (0,0,value) arguments, and asks the original HInstructionBuilder to append
+ * the clone. The fixture JNI sink verifies two calls per access. There is NO
+ * general arbitrary-field support in this proof.
+ *
+ * Android 13 AOSP HInstruction has 21 virtual entries (two destructor
+ * slots); Clone(ArenaAllocator*) is entry 14. HBasicBlock::graph_ and
+ * HGraph::allocator_ are each at offset zero in this particular source
+ * revision. If any of the binary/ABI identity checks fail, do NOT mutate.
+ * The caller must invoke this in HInstructionBuilder::AppendInstruction's
+ * onLeave, before the builder leaves its current block, and never recurse.
+ */
+EXPORT int artwatch_shadow_clone_template_invoke(
+    void *builder, const void *source,
+    const void *get_vtable, const void *invoke_vtable,
+    uint32_t expected_get_pc, uint32_t expected_invoke_pc) {
+  if (ready != 1 || !aligned(builder) || !aligned(source) ||
+      !aligned(get_vtable) || !aligned(invoke_vtable)) return -1;
+  Dl_info iv = {0}, gv = {0};
+  if (!dladdr(invoke_vtable, &iv) || !dladdr(get_vtable, &gv) ||
+      !named(iv.dli_fname,"libart-compiler.so") ||
+      !named(gv.dli_fname,"libart-compiler.so") ||
+      iv.dli_sname == NULL || gv.dli_sname == NULL ||
+      strcmp(iv.dli_sname,"_ZTVN3art21HInvokeStaticOrDirectE") ||
+      strcmp(gv.dli_sname,"_ZTVN3art17HInstanceFieldGetE") ||
+      iv.dli_saddr != invoke_vtable || gv.dli_saddr != get_vtable)
+    return -2;
+  const uint8_t *src=(const uint8_t *)source;
+  const void *vptr=NULL,*previous=NULL,*block=NULL,*get_vptr=NULL;
+  uint32_t invoke_pc=UINT32_MAX,get_pc=UINT32_MAX;
+  memcpy(&vptr,src,sizeof(vptr));
+  memcpy(&previous,src+sizeof(void*),sizeof(previous));
+  memcpy(&block,src+3*sizeof(void*),sizeof(block));
+  memcpy(&invoke_pc,src+4*sizeof(void*),sizeof(invoke_pc));
+  if (vptr!=(const uint8_t *)invoke_vtable+2*sizeof(void*) ||
+      !aligned(previous) || !aligned(block) ||
+      invoke_pc!=expected_invoke_pc) return -3;
+  memcpy(&get_vptr,previous,sizeof(get_vptr));
+  memcpy(&get_pc,(const uint8_t*)previous+4*sizeof(void*),sizeof(get_pc));
+  if (get_vptr!=(const uint8_t*)get_vtable+2*sizeof(void*) ||
+      get_pc!=expected_get_pc) return -4;
+  const void *next=NULL,*prev_block=NULL;
+  memcpy(&next,(const uint8_t*)previous+2*sizeof(void*),sizeof(next));
+  memcpy(&prev_block,(const uint8_t*)previous+3*sizeof(void*),sizeof(prev_block));
+  if (next!=source || prev_block!=block) return -5;
+  // HBasicBlock::graph_ and HGraph::allocator_ (exact version only).
+  const void *graph=NULL,*arena=NULL;
+  memcpy(&graph,block,sizeof(graph));
+  if (!aligned(graph)) return -6;
+  memcpy(&arena,graph,sizeof(arena));
+  if (!aligned(arena)) return -6;
+  // Use the real virtual Clone, never reinterpret/allocate an ART node.
+  const void *clone_entry=NULL;
+  memcpy(&clone_entry,(const uint8_t*)vptr+14*sizeof(void*),sizeof(clone_entry));
+  Dl_info ci={0};
+  if (!aligned(clone_entry) || !dladdr(clone_entry,&ci) ||
+      !named(ci.dli_fname,"libart-compiler.so")) return -7;
+  void *h=dlopen("libart-compiler.so",RTLD_NOW|RTLD_NOLOAD);
+  if (h==NULL) return -8;
+  void (*append)(void*,void*)=(void(*)(void*,void*))dlsym(
+       h,"_ZN3art19HInstructionBuilder17AppendInstructionEPNS_12HInstructionE");
+  if (append==NULL) { dlclose(h); return -8; }
+  typedef void *(*CloneFn)(const void*,void*);
+  void *copy=((CloneFn)clone_entry)(source,(void*)arena);
+  if (!aligned(copy)) {dlclose(h); return -9;}
+  // AppendInstruction both inserts through HBasicBlock::AddInstruction
+  // and calls HInstructionBuilder::InitializeInstruction() so an invoke
+  // gets a compiler-built environment, rather than a copied/stale one.
+  append(builder,copy);
+  dlclose(h);
+  const void *copy_block=NULL,*copy_prev=NULL;
+  memcpy(&copy_block,(const uint8_t*)copy+3*sizeof(void*),sizeof(copy_block));
+  memcpy(&copy_prev,(const uint8_t*)copy+sizeof(void*),sizeof(copy_prev));
+  return copy_block==block && copy_prev==source ? 1 : -10;
+}
 // Writes only into the caller's scratch buffer, never to ART memory.
 EXPORT int artwatch_shadow_report(char *out, uint32_t length) {
   if (out == NULL || length < 96) return 0;

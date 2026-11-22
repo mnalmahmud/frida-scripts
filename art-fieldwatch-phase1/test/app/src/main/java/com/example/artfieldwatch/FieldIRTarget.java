@@ -101,8 +101,12 @@ public final class FieldIRTarget {
     try { p3TemplateCarrierOn(null, 777); }
     catch (NullPointerException expected) { threw = true; }
     if (!threw) throw new AssertionError("P3 template null write did not throw");
-    if (FieldEventSink.eventCount() != 0)
+    if (FieldEventSink.p3Enabled()) {
+      if (!FieldEventSink.p3Verified())
+        throw new AssertionError("Compiler-cloned P3 reads missing or incorrect");
+    } else if (FieldEventSink.eventCount() != 0) {
       throw new AssertionError("P3 template polluted the event stream");
+    }
     return checksum;
   }
 
