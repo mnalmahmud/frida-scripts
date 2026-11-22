@@ -179,7 +179,9 @@ function loadPassiveShadow() {
       instructionDexPc: exported('artwatch_shadow_instruction_dex_pc','int',
         ['pointer','pointer','pointer']),
       cloneTemplate: exported('artwatch_shadow_clone_template_invoke','int',
-        ['pointer','pointer','pointer','pointer','uint','uint','pointer'])
+        ['pointer','pointer','pointer','pointer','uint','uint','pointer']),
+      cloneBefore: exported('artwatch_shadow_clone_invoke_before','int',
+        ['pointer','pointer','pointer','uint','uint','pointer','pointer'])
     };
     send({type:'artwatch-shadow-init',ready:true,source:'native',
       buildIdVerified:true,mutable:false});
@@ -1285,10 +1287,12 @@ function attachP3CloneCanary(compiler) {
   if (!fixture || !Number.isInteger(fixture.getDexPc) ||
       !Number.isInteger(fixture.invokeDexPc)) return false;
   const site=getExport(compiler,INVOKE_ACCEPT);
-  const append=getExport(compiler,NAMES.appendInstruction);
+  const insert=getExport(compiler,
+    '_ZN3art11HBasicBlock23InsertInstructionBeforeEPNS_12HInstructionES2_');
+  const copyEnv=getExport(compiler,'_ZN3art12HEnvironment8CopyFromEPS0_');
   const invokeVt=getExport(compiler,INVOKE_VTABLE);
   const getVt=getExport(compiler,'_ZTVN3art17HInstanceFieldGetE');
-  if (!site || !append || !invokeVt || !getVt) return false;
+  if (!site || !insert || !copyEnv || !invokeVt || !getVt) return false;
   let cloning=false;
   let successes=0;
   let attempts=0;
@@ -1303,7 +1307,7 @@ function attachP3CloneCanary(compiler) {
         if (!active || !state || !targetMethodPointers.has(active.method))
           return;
         if (!shadowShim) loadPassiveShadow();
-        if (!shadowShim || !shadowShim.cloneTemplate ||
+        if (!shadowShim || !shadowShim.cloneBefore ||
             !shadowShim.instructionDexPc) return;
         const node=args[0];
         const size=Process.pointerSize;
@@ -1319,22 +1323,16 @@ function attachP3CloneCanary(compiler) {
             return;
           if (shadowShim.instructionDexPc(previous,getVt.address,pc)!==1 ||
               pc.readU32()!==fixture.getDexPc) return;
-          // BuildInstanceFieldAccess records its real HInstructionBuilder*
-          // for this compilation. Its current block and locals must still
-          // exist, otherwise AppendInstruction cannot make a valid invoke.
-          if (!activeGraphBuild.has(thread) || !state.p3Builder) {
-            if (missedBuilder++<2)
-              send({type:'artwatch-p3-clone-skipped',reason:'builder-not-live',
-                method:active.method,getDexPc:fixture.getDexPc,
-                invokeDexPc:fixture.invokeDexPc});
-            return;
-          }
+          // Same-graph clone immediately before original invoke.
+          // No HInstructionBuilder state is required, so this also works
+          // when ART inlines AppendInstruction.
           attempts++;
           cloning=true;
           try {
-            const rc=shadowShim.cloneTemplate(state.p3Builder,node,
+            const rc=shadowShim.cloneBefore(node,
               getVt.address,invokeVt.address,
-              fixture.getDexPc,fixture.invokeDexPc,append.address);
+              fixture.getDexPc,fixture.invokeDexPc,
+              insert.address,copyEnv.address);
             send({type:'artwatch-p3-clone',rc,method:active.method,
               attempt:attempts,trigger:'invoke_accept',
               getDexPc:fixture.getDexPc,invokeDexPc:fixture.invokeDexPc});

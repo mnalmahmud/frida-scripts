@@ -7,6 +7,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/system_properties.h>
 #define EXPORT __attribute__((visibility("default")))
@@ -336,6 +337,120 @@ EXPORT int artwatch_shadow_clone_template_invoke(
   memcpy(&copy_block,(const uint8_t*)copy+3*sizeof(void*),sizeof(copy_block));
   memcpy(&copy_prev,(const uint8_t*)copy+sizeof(void*),sizeof(copy_prev));
   return copy_block==block && copy_prev==source ? 1 : -10;
+}
+
+/*
+ * Exact API33 x86_64 *fixture-only* invoke insertion.
+ *
+ * The earlier builder append experiment proved Clone() is callable but
+ * appended to the wrong basic block (rc=-10). InsertInstructionBefore()
+ * works directly on the actual source block, preserving instruction order.
+ *
+ * HEnvironment is an ART arena vector, not an object to share with a second
+ * holder. This prototype clones its source-matched layout into independent
+ * one-shot malloc storage (intentionally retained for the life of the process)
+ * and invokes ART's exported HEnvironment::CopyFrom() to rebuild env-use
+ * records in the graph's own arena. This is NOT production memory management.
+ *
+ * Source layout: Android 13 ART HInstruction and HEnvironment, libc++ x86_64
+ * vector + ArenaAllocatorAdapter. Runtime and compiler ELF Build IDs MUST
+ * match exactly before touching the graph. Inlined environments are rejected.
+ */
+EXPORT int artwatch_shadow_clone_invoke_before(
+    const void *source, const void *get_vtable, const void *invoke_vtable,
+    uint32_t expected_get_pc, uint32_t expected_invoke_pc,
+    const void *insert_address, const void *copy_env_address) {
+  if (ready != 1 || !aligned(source) || !aligned(get_vtable) ||
+      !aligned(invoke_vtable) || !aligned(insert_address) ||
+      !aligned(copy_env_address)) return -1;
+  struct {const void *address; const char *name;} syms[4] = {
+    {get_vtable,"_ZTVN3art17HInstanceFieldGetE"},
+    {invoke_vtable,"_ZTVN3art21HInvokeStaticOrDirectE"},
+    {insert_address,
+      "_ZN3art11HBasicBlock23InsertInstructionBeforeEPNS_12HInstructionES2_"},
+    {copy_env_address,"_ZN3art12HEnvironment8CopyFromEPS0_"}
+  };
+  for (size_t n=0;n<4;n++) {
+    Dl_info info={0};
+    if (!dladdr(syms[n].address,&info) ||
+        !named(info.dli_fname,"libart-compiler.so") ||
+        info.dli_sname==NULL || info.dli_saddr!=syms[n].address ||
+        strcmp(info.dli_sname,syms[n].name)!=0) return -2;
+  }
+  const uint8_t *src=(const uint8_t*)source;
+  const void *vptr=NULL,*get=NULL,*block=NULL,*get_vptr=NULL;
+  uint32_t get_pc=UINT32_MAX,invoke_pc=UINT32_MAX;
+  memcpy(&vptr,src,sizeof(vptr));
+  memcpy(&get,src+8,sizeof(get));
+  memcpy(&block,src+24,sizeof(block));
+  memcpy(&invoke_pc,src+32,sizeof(invoke_pc));
+  if (vptr!=(const uint8_t*)invoke_vtable+16 || !aligned(get) ||
+      !aligned(block) || invoke_pc!=expected_invoke_pc) return -3;
+  memcpy(&get_vptr,get,sizeof(get_vptr));
+  memcpy(&get_pc,(const uint8_t*)get+32,sizeof(get_pc));
+  if (get_vptr!=(const uint8_t*)get_vtable+16 ||
+      get_pc!=expected_get_pc) return -4;
+  const void *get_next=NULL,*get_block=NULL;
+  memcpy(&get_next,(const uint8_t*)get+16,sizeof(get_next));
+  memcpy(&get_block,(const uint8_t*)get+24,sizeof(get_block));
+  if (get_next!=source || get_block!=block) return -5;
+
+  // Verify source environment is uninlined, has a populated vector of
+  // (instruction, before-use-node) records, and no allocated locations yet.
+  const void *old_env=NULL;
+  memcpy(&old_env,src+64,sizeof(old_env));
+  if (!aligned(old_env)) return -6;
+  const uint8_t *oe=(const uint8_t*)old_env;
+  const void *v_begin=NULL,*v_end=NULL,*v_cap=NULL;
+  const void *loc_begin=NULL,*loc_end=NULL,*parent=NULL,*holder=NULL;
+  memcpy(&v_begin,oe+0,8); memcpy(&v_end,oe+8,8);
+  memcpy(&v_cap,oe+16,8);
+  memcpy(&loc_begin,oe+32,8); memcpy(&loc_end,oe+40,8);
+  memcpy(&parent,oe+64,8); memcpy(&holder,oe+88,8);
+  if (parent!=NULL || holder!=source || loc_begin!=loc_end ||
+      !aligned(v_begin) || !aligned(v_end) || !aligned(v_cap) ||
+      (uintptr_t)v_begin>(uintptr_t)v_end ||
+      (uintptr_t)v_end>(uintptr_t)v_cap) return -7;
+  size_t bytes=(uintptr_t)v_end-(uintptr_t)v_begin;
+  if ((bytes%16u)!=0u || bytes>128u*16u) return -7;
+  void *graph=NULL,*arena=NULL,*clone_entry=NULL;
+  memcpy(&graph,block,sizeof(graph));
+  if (!aligned(graph)) return -8;
+  memcpy(&arena,graph,sizeof(arena));
+  if (!aligned(arena)) return -8;
+  memcpy(&clone_entry,(const uint8_t*)vptr+14*8,sizeof(clone_entry));
+  Dl_info ci={0};
+  if (!aligned(clone_entry)||!dladdr(clone_entry,&ci)||
+      !named(ci.dli_fname,"libart-compiler.so"))return -9;
+
+  // Allocate before any IR mutation, so failure cannot leave a partial node.
+  void *environment=calloc(1,96);
+  void *records=calloc(1,bytes==0?16:bytes);
+  if (!environment || !records) {
+    free(environment); free(records); return -10;
+  }
+  memcpy(environment,old_env,96);
+  const uint8_t *begin=(const uint8_t*)records;
+  const void *new_end=begin+bytes;
+  memcpy((uint8_t*)environment+0,&records,8);
+  memcpy((uint8_t*)environment+8,&new_end,8);
+  memcpy((uint8_t*)environment+16,&new_end,8);
+  typedef void *(*CloneFn)(const void*,void*);
+  void *copy=((CloneFn)clone_entry)(source,arena);
+  if (!aligned(copy)) {free(environment);free(records);return -11;}
+  memcpy((uint8_t*)environment+88,&copy,8);
+  // Insert updates input users, IDs, and block links through ART itself.
+  ((void(*)(void*,void*,void*))insert_address)((void*)block,copy,(void*)source);
+  // CopyFrom creates *new* env-use list entries on graph-owned allocators.
+  ((void(*)(void*,void*))copy_env_address)(environment,(void*)old_env);
+  memcpy((uint8_t*)copy+64,&environment,8);
+  // Heap environment is intentionally retained after graph lifetime.
+  const void *copy_block=NULL,*copy_next=NULL,*copy_env=NULL;
+  memcpy(&copy_block,(const uint8_t*)copy+24,8);
+  memcpy(&copy_next,(const uint8_t*)copy+16,8);
+  memcpy(&copy_env,(const uint8_t*)copy+64,8);
+  return copy_block==block && copy_next==source && copy_env==environment ?
+      1 : -12;
 }
 // Writes only into the caller's scratch buffer, never to ART memory.
 EXPORT int artwatch_shadow_report(char *out, uint32_t length) {
