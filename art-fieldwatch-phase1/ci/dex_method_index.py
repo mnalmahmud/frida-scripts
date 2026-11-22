@@ -117,7 +117,7 @@ def canary_pcs(data, sink_idx):
             raise ValueError("bad string ID")
         off = u32(data, strings_off + 4 * idx)
         _, pos = uleb128(data, off)
-        end = data.find(b"\\0", pos)
+        end = data.find(b"\0", pos)
         if end < 0:
             raise ValueError("bad string terminator")
         return data[pos:end].decode("ascii")
