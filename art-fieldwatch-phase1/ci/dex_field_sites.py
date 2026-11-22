@@ -86,7 +86,7 @@ def debug_lines(data, off):
         elif op in (3,4):
             count=4 if op==4 else 3
             for __ in range(count): _,off=uleb128(data,off)
-        elif op == 9:
+        elif op in (5,6,9):
             _,off=uleb128(data,off)
         elif op in (7,8): pass
         else:
