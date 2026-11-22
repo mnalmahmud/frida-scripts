@@ -151,3 +151,68 @@ EVENT_EXPORT int artwatch_events_snapshot(char *out, uint32_t length) {
   const uint32_t count = total < EVENT_CAPACITY ? total : EVENT_CAPACITY;
   return format_events(out, length, events, total, lost, count, 1);
 }
+
+/*
+ * Generic compiler-event ABI (no Java fixture site constants):
+ * dex_id identifies the per-APK DEX, method/field IDs are DEX table indices,
+ * dex_pc is the instruction's actual DEX code-unit PC.
+ * type: 1 boolean, 2 byte, 3 char, 4 short, 5 int, 6 long,
+ *       7 float, 8 double, 9 object identity (opaque unsigned bits).
+ * value_bits is the exact primitive bit pattern or an opaque reference token.
+ * JNI refs must not be held here. Java object identity requires a separate
+ * GC-safe producer before it can be supported end-to-end.
+ *
+ * The ABI is ready for source-matched compiler-side calls. Existing P2/P3
+ * recordInt is intentionally untouched until the injector migrates to this.
+ */
+#define FIELD_METADATA_CAPACITY 4096u
+struct detailed_field_event {
+  uint32_t dex_id, method_id, field_id, dex_pc, kind, type;
+  uint64_t bits;
+};
+static struct detailed_field_event detailed_events[FIELD_METADATA_CAPACITY];
+static atomic_uint detailed_ready[FIELD_METADATA_CAPACITY];
+static atomic_uint detailed_count = 0;
+static atomic_uint detailed_dropped = 0;
+EVENT_EXPORT void artwatch_events_record_field(
+    uint32_t dex_id, uint32_t method_id, uint32_t field_id,
+    uint32_t dex_pc, uint32_t kind, uint32_t type, uint64_t bits) {
+  if ((kind != 1u && kind != 2u) || type < 1u || type > 9u) return;
+  const uint32_t slot=atomic_fetch_add_explicit(&detailed_count,1u,memory_order_relaxed);
+  if (slot >= FIELD_METADATA_CAPACITY) {
+    atomic_fetch_add_explicit(&detailed_dropped,1u,memory_order_relaxed);
+    return;
+  }
+  detailed_events[slot]=(struct detailed_field_event){
+    .dex_id=dex_id, .method_id=method_id, .field_id=field_id,
+    .dex_pc=dex_pc, .kind=kind, .type=type, .bits=bits
+  };
+  atomic_store_explicit(&detailed_ready[slot],1u,memory_order_release);
+}
+EVENT_EXPORT int artwatch_events_field_snapshot(char *out,uint32_t length) {
+  if (out==NULL || length<128u) return 0;
+  const uint32_t total=atomic_load_explicit(&detailed_count,memory_order_acquire);
+  const uint32_t dropped=atomic_load_explicit(&detailed_dropped,memory_order_acquire);
+  const uint32_t stored=total<FIELD_METADATA_CAPACITY ? total:FIELD_METADATA_CAPACITY;
+  size_t used=0;
+  int n=snprintf(out,length,
+    "{\"version\":2,\"total\":%u,\"dropped\":%u,\"events\":[",total,dropped);
+  if (n<0 || (size_t)n>=length) return 0;
+  used+=(size_t)n;
+  for(uint32_t i=0;i<stored;i++) {
+    if (atomic_load_explicit(&detailed_ready[i],memory_order_acquire)!=1u)
+      return 0;
+    const struct detailed_field_event *e=&detailed_events[i];
+    n=snprintf(out+used,length-used,
+      "%s{\"seq\":%u,\"dexId\":%u,\"methodId\":%u,"
+      "\"fieldId\":%u,\"dexPc\":%u,\"kind\":%u,\"type\":%u,"
+      "\"valueBits\":\"0x%016llx\"}", i?",":"",
+      i+1u,e->dex_id,e->method_id,e->field_id,e->dex_pc,
+      e->kind,e->type,(unsigned long long)e->bits);
+    if (n<0 || (size_t)n>=length-used) return 0;
+    used+=(size_t)n;
+  }
+  if (used+3u>length) return 0;
+  out[used++]=']';out[used++]='}';out[used]='\0';
+  return 1;
+}

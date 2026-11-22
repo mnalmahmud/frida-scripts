@@ -1546,6 +1546,17 @@ function main() {
 // Host-facing runtime event transport. Does not rely on compiler tracing.
 // This is a real JNI event recorder populated by executed application code.
 rpc.exports = {
+  fieldmeta() {
+    const module = Process.findModuleByName('libartwatch_events.so');
+    if (!module) return {ready:false,reason:'native event module not loaded'};
+    const address = module.findExportByName('artwatch_events_field_snapshot');
+    if (address === null) return {ready:false,reason:'metadata export absent'};
+    const snapshot = new NativeFunction(address,'int',['pointer','uint']);
+    const buffer = Memory.alloc(524288);
+    if (snapshot(buffer,524288) !== 1)
+      return {ready:false,reason:'metadata event buffer not ready or full'};
+    return {ready:true,...JSON.parse(buffer.readUtf8String())};
+  },
   p3events() {
     const module = Process.findModuleByName('libartwatch_events.so');
     if (!module) return {ready:false,reason:'native event module not loaded'};
