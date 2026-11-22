@@ -243,6 +243,7 @@ function attach(layer, site) {
             method: this.method, kind: this.compilationKind,
             existingInvokeVisits: 0, existingInvokeNodes: new Set(),
             existingInvokeBlockVisits: 0,
+            p3Builder: null,
             existingInvokeLocations: new Set(),
             existingInvokeEmitted: new Set(),
             adjacencyProbes: 0, adjacencyMatches: 0,
@@ -702,6 +703,12 @@ function attachFieldBuilder(access, site) {
           dexPc: args[2].toUInt32(), isPut: args[3].toInt32() !== 0,
           opcode, fieldIndexRaw, ordinal};
         activeFieldBuilder.set(thread, {...event, builder: args[0].toString()});
+        // Keep the builder only in this live compilation's state.
+        // P3 requires ART to initialize a new invoke's SSA environment.
+        const targetState=targetStates.get(thread);
+        if (targetState && access==='instance' &&
+            opcode===0x52 && !event.isPut)
+          targetState.p3Builder=args[0];
         // Identify self-contained field read/write methods from DEX patterns,
         // not only the old iput@0/iget@2 pattern. The release fixture adds
         // identity(this) between iput and iget so both survive D8.
@@ -1277,62 +1284,77 @@ function attachP3CloneCanary(compiler) {
   const fixture=globalThis.__artwatchP3Fixture;
   if (!fixture || !Number.isInteger(fixture.getDexPc) ||
       !Number.isInteger(fixture.invokeDexPc)) return false;
+  const site=getExport(compiler,INVOKE_ACCEPT);
   const append=getExport(compiler,NAMES.appendInstruction);
-  const vt=getExport(compiler,INVOKE_VTABLE);
-  const get=getExport(compiler,'_ZTVN3art17HInstanceFieldGetE');
-  if (!append || !vt || !get) return false;
-  let inClone=false;
-  let complete=0;
+  const invokeVt=getExport(compiler,INVOKE_VTABLE);
+  const getVt=getExport(compiler,'_ZTVN3art17HInstanceFieldGetE');
+  if (!site || !append || !invokeVt || !getVt) return false;
+  let cloning=false;
+  let successes=0;
+  let attempts=0;
+  let missedBuilder=0;
   try {
-    Interceptor.attach(append.address,{
+    Interceptor.attach(site.address,{
       onEnter(args) {
-        this.candidate=null;
-        if (inClone || complete>0) return;
-        const active=compiling.get(this.threadId);
-        if (!active || !targetMethodPointers.has(active.method)) return;
+        if (cloning || successes!==0) return;
+        const thread=this.threadId;
+        const active=compiling.get(thread);
+        const state=targetStates.get(thread);
+        if (!active || !state || !targetMethodPointers.has(active.method))
+          return;
         if (!shadowShim) loadPassiveShadow();
         if (!shadowShim || !shadowShim.cloneTemplate ||
             !shadowShim.instructionDexPc) return;
-        this.candidate={builder:args[0],node:args[1],method:active.method};
-      },
-      onLeave() {
-        if (!this.candidate || inClone || complete>0) return;
-        const {builder,node,method}=this.candidate;
-        // At AppendInstruction *entry*, the node is unlinked and has no
-        // previous_ or block_. Only inspect its ownership AFTER ART's
-        // original append + InitializeInstruction completed.
+        const node=args[0];
+        const size=Process.pointerSize;
         try {
-          if (!node.readPointer().equals(vt.address.add(2*Process.pointerSize)))
+          if (!node.readPointer().equals(invokeVt.address.add(2*size)))
             return;
           const pc=Memory.alloc(4);
-          if (shadowShim.instructionDexPc(node,vt.address,pc)!==1 ||
+          if (shadowShim.instructionDexPc(node,invokeVt.address,pc)!==1 ||
               pc.readU32()!==fixture.invokeDexPc) return;
-          const previous=node.add(Process.pointerSize).readPointer();
+          const previous=node.add(size).readPointer();
           if (previous.isNull() ||
-              !previous.readPointer().equals(get.address.add(2*Process.pointerSize)))
+              !previous.readPointer().equals(getVt.address.add(2*size)))
             return;
-          if (shadowShim.instructionDexPc(previous,get.address,pc)!==1 ||
+          if (shadowShim.instructionDexPc(previous,getVt.address,pc)!==1 ||
               pc.readU32()!==fixture.getDexPc) return;
-        } catch (_) {return;}
-        inClone=true;
-        try {
-          const rc=shadowShim.cloneTemplate(builder,node,get.address,
-            vt.address,fixture.getDexPc,fixture.invokeDexPc,append.address);
-          send({type:'artwatch-p3-clone',rc,method,
-            getDexPc:fixture.getDexPc,invokeDexPc:fixture.invokeDexPc});
-          if (rc===1) {
-            complete++;
-            const library=Process.findModuleByName('libartwatch_events.so');
-            const address=library && library.findExportByName('artwatch_events_set_p3');
-            if (address) new NativeFunction(address,'void',['int'])(1);
+          // BuildInstanceFieldAccess records its real HInstructionBuilder*
+          // for this compilation. Its current block and locals must still
+          // exist, otherwise AppendInstruction cannot make a valid invoke.
+          if (!activeGraphBuild.has(thread) || !state.p3Builder) {
+            if (missedBuilder++<2)
+              send({type:'artwatch-p3-clone-skipped',reason:'builder-not-live',
+                method:active.method,getDexPc:fixture.getDexPc,
+                invokeDexPc:fixture.invokeDexPc});
+            return;
           }
+          attempts++;
+          cloning=true;
+          try {
+            const rc=shadowShim.cloneTemplate(state.p3Builder,node,
+              getVt.address,invokeVt.address,
+              fixture.getDexPc,fixture.invokeDexPc,append.address);
+            send({type:'artwatch-p3-clone',rc,method:active.method,
+              attempt:attempts,trigger:'invoke_accept',
+              getDexPc:fixture.getDexPc,invokeDexPc:fixture.invokeDexPc});
+            if (rc===1) {
+              successes++;
+              const module=Process.findModuleByName('libartwatch_events.so');
+              const address=module && module.findExportByName('artwatch_events_set_p3');
+              if (address)
+                new NativeFunction(address,'void',['int'])(1);
+            }
+          } finally {cloning=false;}
         } catch(e) {
-          send({type:'artwatch-p3-clone-error',error:String(e)});
-        } finally {inClone=false;}
+          cloning=false;
+          send({type:'artwatch-p3-clone-error',error:String(e),
+            method:active.method});
+        }
       }
     });
     send({type:'artwatch-hook-attached',layer:'p3_clone_canary',
-      address:append.address.toString(),source:'export'});
+      address:site.address.toString(),source:'invoke-accept'});
     return true;
   } catch(e) {
     send({type:'artwatch-p3-clone-error',error:String(e)});
