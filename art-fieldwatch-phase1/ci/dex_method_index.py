@@ -42,7 +42,7 @@ def uleb128(data, pos):
 
 
 def sink_method_index(data):
-    if len(data) < 0x70 or data[:4] != b"dex\\n":
+    if len(data) < 0x70 or data[:4] != b"dex\n":
         raise ValueError("not a DEX file")
     strings_count, strings_off = u32(data, 0x38), u32(data, 0x3c)
     types_count, types_off = u32(data, 0x40), u32(data, 0x44)
@@ -62,7 +62,7 @@ def sink_method_index(data):
         if idx not in cache:
             off = u32(data, strings_off + 4 * idx)
             _, start = uleb128(data, off)
-            end = data.find(b"\\0", start)
+            end = data.find(b"\0", start)
             if end < 0:
                 raise ValueError("unterminated DEX string")
             # Java descriptors and method names are ASCII even though
@@ -130,7 +130,7 @@ def apk_sink_method(apk):
 def self_test():
     strings = [SINK_CLASS, SINK_NAME, "I", "V"]
     data = bytearray(1024)
-    data[:8] = b"dex\\n035\\0"
+    data[:8] = b"dex\n035\0"
     strings_off, types_off, protos_off, methods_off = 0x100, 0x120, 0x140, 0x160
     for base, count_off, offset_off, count in [
             (strings_off, 0x38, 0x3c, len(strings)),
@@ -141,7 +141,7 @@ def self_test():
     cursor = 0x200
     for i, value in enumerate(strings):
         struct.pack_into("<I", data, strings_off + 4*i, cursor)
-        blob = bytes([len(value)]) + value.encode("ascii") + b"\\0"
+        blob = bytes([len(value)]) + value.encode("ascii") + b"\0"
         data[cursor:cursor + len(blob)] = blob
         cursor += len(blob)
     # class, int, void types; shorty does not matter for lookup.
