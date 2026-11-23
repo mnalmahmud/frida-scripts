@@ -245,6 +245,7 @@ EXPORT int artwatch_shadow_instruction_dex_pc(
       !named(info.dli_fname, "libart-compiler.so") ||
       info.dli_sname == NULL || info.dli_saddr != vt_symbol) return 0;
   if (strcmp(info.dli_sname, "_ZTVN3art17HInstanceFieldGetE") != 0 &&
+      strcmp(info.dli_sname, "_ZTVN3art17HInstanceFieldSetE") != 0 &&
       strcmp(info.dli_sname, "_ZTVN3art21HInvokeStaticOrDirectE") != 0)
     return 0;
   const void *actual_vptr = NULL;
@@ -360,21 +361,25 @@ EXPORT int artwatch_shadow_clone_invoke_before(
     const void *source, const void *get_vtable, const void *invoke_vtable,
     uint32_t expected_get_pc, uint32_t expected_invoke_pc,
     const void *insert_address, const void *copy_env_address,
-    int field_kind, void **out_clone) {
+    int field_kind, void **out_clone,
+    const void *replace_input_address, const void *int_vtable) {
   if (out_clone==NULL || !aligned(out_clone)) return -1;
   *out_clone=NULL;
   if ((field_kind!=1 && field_kind!=2) || ready != 1 || !aligned(source) || !aligned(get_vtable) ||
       !aligned(invoke_vtable) || !aligned(insert_address) ||
-      !aligned(copy_env_address)) return -1;
-  struct {const void *address; const char *name;} syms[4] = {
+      !aligned(copy_env_address) || !aligned(replace_input_address) ||
+      !aligned(int_vtable)) return -1;
+  struct {const void *address; const char *name;} syms[6] = {
     {get_vtable,field_kind==2 ?
       "_ZTVN3art17HInstanceFieldSetE" : "_ZTVN3art17HInstanceFieldGetE"},
     {invoke_vtable,"_ZTVN3art21HInvokeStaticOrDirectE"},
     {insert_address,
       "_ZN3art11HBasicBlock23InsertInstructionBeforeEPNS_12HInstructionES2_"},
-    {copy_env_address,"_ZN3art12HEnvironment8CopyFromEPS0_"}
+    {copy_env_address,"_ZN3art12HEnvironment8CopyFromEPS0_"},
+    {replace_input_address,"_ZN3art12HInstruction12ReplaceInputEPS0_m"},
+    {int_vtable,"_ZTVN3art12HIntConstantE"}
   };
-  for (size_t n=0;n<4;n++) {
+  for (size_t n=0;n<6;n++) {
     Dl_info info={0};
     if (!dladdr(syms[n].address,&info) ||
         !named(info.dli_fname,"libart-compiler.so") ||
@@ -395,7 +400,7 @@ EXPORT int artwatch_shadow_clone_invoke_before(
   // same-block links for writes; keep the proved direct-read path.
   const void *cursor=source;
   const void *field=NULL;
-  const unsigned limit=field_kind==2 ? 8u : 1u;
+  const unsigned limit=8u;
   for (unsigned n=0;n<limit;n++) {
     const void *prior=NULL,*next=NULL,*prior_block=NULL,*vt=NULL;
     memcpy(&prior,(const uint8_t*)cursor+8,8);
@@ -414,6 +419,33 @@ EXPORT int artwatch_shadow_clone_invoke_before(
     cursor=prior;
   }
   if (field==NULL) return -4;
+
+  // Source-matched x86_64 ArrayRef ABI: virtual slot 2 returns a
+  // pointer/size pair; HUserRecord is two machine words. Prove the
+  // invoke value is the actual get result or store value before mutation.
+  struct input_ref {const void **data; size_t size;};
+  typedef struct input_ref (*InputFn)(const void *);
+  const void *input_fn=NULL,*field_input_fn=NULL,*field_vptr=NULL;
+  memcpy(&input_fn,(const uint8_t*)vptr+2*8,8);
+  memcpy(&field_vptr,field,8);
+  memcpy(&field_input_fn,(const uint8_t*)field_vptr+2*8,8);
+  Dl_info ii={0},fi={0};
+  if (!aligned(input_fn) || !aligned(field_input_fn) ||
+      !dladdr(input_fn,&ii) || !dladdr(field_input_fn,&fi) ||
+      !named(ii.dli_fname,"libart-compiler.so") ||
+      !named(fi.dli_fname,"libart-compiler.so")) return -13;
+  struct input_ref args=((InputFn)input_fn)(source);
+  struct input_ref field_args=((InputFn)field_input_fn)(field);
+  if (args.size!=3 || !aligned(args.data) ||
+      field_args.size!=(field_kind==2?2u:1u) ||
+      !aligned(field_args.data)) return -14;
+  const void *site_arg=args.data[0],*kind_arg=args.data[2],*value_arg=args.data[4];
+  if (!aligned(site_arg)||!aligned(kind_arg)||!aligned(value_arg)||
+      site_arg==kind_arg || value_arg!=(field_kind==2?field_args.data[2]:field))
+    return -15;
+  const void *sv=NULL,*kv=NULL;
+  memcpy(&sv,site_arg,8);memcpy(&kv,kind_arg,8);
+  if (sv!=(const uint8_t*)int_vtable+16 || kv!=sv) return -16;
 
   // Verify source environment is uninlined, has a populated vector of
   // (instruction, before-use-node) records, and no allocated locations yet.
@@ -461,6 +493,9 @@ EXPORT int artwatch_shadow_clone_invoke_before(
   memcpy((uint8_t*)environment+88,&copy,8);
   // Insert updates input users, IDs, and block links through ART itself.
   ((void(*)(void*,void*,void*))insert_address)((void*)block,copy,(void*)source);
+  // ART updates use lists. Only the cloned invoke receives the site marker
+  // as its operation operand; the authored invoke remains inert.
+  ((void(*)(void*,const void*,size_t))replace_input_address)(copy,site_arg,1u);
   // CopyFrom creates *new* env-use list entries on graph-owned allocators.
   ((void(*)(void*,void*))copy_env_address)(environment,(void*)old_env);
   memcpy((uint8_t*)copy+64,&environment,8);
@@ -469,7 +504,10 @@ EXPORT int artwatch_shadow_clone_invoke_before(
   memcpy(&copy_block,(const uint8_t*)copy+24,8);
   memcpy(&copy_next,(const uint8_t*)copy+16,8);
   memcpy(&copy_env,(const uint8_t*)copy+64,8);
-  if (copy_block==block && copy_next==source && copy_env==environment) {
+  struct input_ref actual=((InputFn)input_fn)(copy);
+  if (copy_block==block && copy_next==source && copy_env==environment &&
+      actual.size==3 && actual.data[0]==site_arg &&
+      actual.data[2]==site_arg && actual.data[4]==value_arg) {
     *out_clone=copy;
     return 1;
   }

@@ -77,17 +77,33 @@ public final class FieldIRTarget {
   // here without compiler injection changing the call's SSA operands.
   public static int p3TemplateCarrierOn(FieldIRTarget receiver, int x) {
     receiver.value = x;
-    FieldEventSink.recordInt(0, 0, x); // write template (cloned by ART)
+    FieldEventSink.recordInt(FieldEventSink.SITE_WRITE_VALUE, 0, x); // inert template
     int observed = identity(receiver).value;
-    FieldEventSink.recordInt(0, 0, observed); // read template (cloned by ART)
+    FieldEventSink.recordInt(FieldEventSink.SITE_READ_VALUE, 0, observed); // inert template
     return observed;
   }
 
+  // Invoke the actual JIT entrypoint; prevent caller inlining from hiding
+  // the measured carrier in the optimized release workload.
+  private static int invokeCarrier(java.lang.reflect.Method method,
+      FieldIRTarget target,int value) throws Exception {
+    try {
+      return (Integer)method.invoke(null,target,value);
+    } catch (java.lang.reflect.InvocationTargetException e) {
+      Throwable cause=e.getCause();
+      if (cause instanceof RuntimeException) throw (RuntimeException)cause;
+      if (cause instanceof Error) throw (Error)cause;
+      throw e;
+    }
+  }
+
   public static int exerciseP3TemplateCarrier(boolean requireInjection)
-      throws InterruptedException {
+      throws Exception {
+    java.lang.reflect.Method carrier=FieldIRTarget.class.getDeclaredMethod(
+        "p3TemplateCarrierOn",FieldIRTarget.class,int.class);
     FieldIRTarget target = new FieldIRTarget();
     for (int i = 0; i < 100000; i++) {
-      if (p3TemplateCarrierOn(target, i) != i)
+      if (invokeCarrier(carrier,target, i) != i)
         throw new AssertionError("P3 template warmup mismatch: " + i);
     }
     if (requireInjection) {
@@ -98,7 +114,7 @@ public final class FieldIRTarget {
       long deadline = System.nanoTime() + 15_000_000_000L;
       while (!FieldEventSink.p3Enabled()) {
         for (int i = 0; i < 1000; i++) {
-          if (p3TemplateCarrierOn(target, i) != i)
+          if (invokeCarrier(carrier,target, i) != i)
             throw new AssertionError("P3 asynchronous warmup mismatch");
         }
         if (System.nanoTime() >= deadline)
@@ -107,7 +123,7 @@ public final class FieldIRTarget {
       }
       Thread.sleep(200);
       for (int i = 0; i < 2000; i++) {
-        if (p3TemplateCarrierOn(target, i) != i)
+        if (invokeCarrier(carrier,target, i) != i)
           throw new AssertionError("P3 published JIT mismatch");
       }
     }
@@ -115,13 +131,13 @@ public final class FieldIRTarget {
     int checksum = 0;
     for (int i = 0; i < 128; i++) {
       int expected = 7 + 3 * i;
-      int result = p3TemplateCarrierOn(target, expected);
+      int result = invokeCarrier(carrier,target, expected);
       if (result != expected)
         throw new AssertionError("P3 template value mismatch: " + i);
       checksum += result;
     }
     boolean threw = false;
-    try { p3TemplateCarrierOn(null, 777); }
+    try { invokeCarrier(carrier,null,777); }
     catch (NullPointerException expected) { threw = true; }
     if (!threw) throw new AssertionError("P3 template null write did not throw");
     if (requireInjection) {

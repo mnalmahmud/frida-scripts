@@ -38,19 +38,3 @@ readelf -Ws "$out/libartwatch_events.so" |
   tee "$out/runtime-events-exports.txt"
 cp "$out/libartwatch_events.so" "$jni_dir/libartwatch_events.so"
 echo "Runtime event library staged for APK packaging: $jni_dir"
-
-# Android ART JVMTI agent for debuggable applications (API 28+).
-cxx="$sdk/ndk/$version/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android33-clang++"
-test -x "$cxx"
-test -f "${JAVA_HOME:?JAVA_HOME required}/include/jvmti.h"
-"$cxx" -std=c++17 -O2 -fPIC -fvisibility=hidden -fstack-protector-strong \
-  -Wall -Wextra -Werror -shared -Wl,-z,relro -Wl,-z,now \
-  -I "$sdk/ndk/$version/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include" \
-  -I "$JAVA_HOME/include" -I "$JAVA_HOME/include/linux" \
-  art-fieldwatch-phase1/native/jvmti-fieldwatch.cc -llog \
-  -o "$out/libartwatch_jvmti.so"
-readelf -Ws "$out/libartwatch_jvmti.so" |
-  grep -E '(Agent_OnAttach|artwatch_jvmti_snapshot)' |
-  tee "$out/jvmti-exports.txt"
-cp "$out/libartwatch_jvmti.so" "$jni_dir/libartwatch_jvmti.so"
-echo "JVMTI agent staged: $jni_dir"

@@ -21,7 +21,6 @@ static atomic_uint ready[EVENT_CAPACITY];
 static atomic_uint next_index = 0;
 static atomic_uint dropped = 0;
 static atomic_uint p3_enabled = 0;
-static atomic_uint p3_sentinel_sequence = 0;
 // Frozen after P3 verification, before the independent P2 workload resets events.
 static struct field_event p3_verified_events[256];
 static atomic_uint p3_archive_ready = 0;
@@ -88,7 +87,6 @@ Java_com_example_artfieldwatch_FieldEventSink_p3Verified(JNIEnv *env,jclass cls)
 static void clear_events(void) {
   atomic_store_explicit(&next_index, 0, memory_order_relaxed);
   atomic_store_explicit(&dropped, 0, memory_order_relaxed);
-  atomic_store_explicit(&p3_sentinel_sequence, 0, memory_order_relaxed);
   reset_detailed_events();
   for (uint32_t i = 0; i < EVENT_CAPACITY; ++i)
     atomic_store_explicit(&ready[i], 0, memory_order_relaxed);
@@ -104,30 +102,22 @@ Java_com_example_artfieldwatch_FieldEventSink_recordInt(
     JNIEnv *env, jclass cls, jint site, jint kind, jint value) {
   (void)env;
   (void)cls;
-  // Keep a real, resolved invoke in the P3 template carrier without
-  // counting the deliberately inactive site/kind (0,0) as a field event.
-  if (site == 0 && kind == 0) {
-    if (!atomic_load_explicit(&p3_enabled,memory_order_acquire)) return;
-    // ART inserts the cloned call immediately BEFORE the source invoke.
-    // Record only cloned write then cloned read calls, not Java source calls.
-    // Ignore the original Java-authored sentinel entirely.
-    uint32_t n=atomic_fetch_add_explicit(&p3_sentinel_sequence,1u,
-                                         memory_order_relaxed);
-    if ((n & 1u)!=0u) return;
-    site=(n & 2u)==0u ? 9001 : 9002;
-    kind=(n & 2u)==0u ? 2 : 1;
-    // This P3 adapter still identifies the cloned call by validated
-    // clone-before-original ordering. The generic ABI itself does not
-    // require that sentinel scheme.
-    if (atomic_load_explicit(&p3_metadata_ready,memory_order_acquire)) {
-      const uint32_t pc=atomic_load_explicit(
-          kind==2 ? &p3_write_pc : &p3_read_pc,memory_order_relaxed);
-      artwatch_events_record_field(
-          atomic_load_explicit(&p3_dex_id,memory_order_relaxed),
-          atomic_load_explicit(&p3_method_id,memory_order_relaxed),
-          atomic_load_explicit(&p3_field_id,memory_order_relaxed),
-          pc,(uint32_t)kind,5u,(uint64_t)(int64_t)value);
-    }
+  // Authored templates are always inert. The compiler clone supplies an
+  // explicit nonzero operation marker; no sequence/parity inference.
+  if (kind == 0) return;
+  if (kind == site && (site == 9001 || site == 9002)) {
+    if (!atomic_load_explicit(&p3_enabled,memory_order_acquire) ||
+        !atomic_load_explicit(&p3_metadata_ready,memory_order_acquire)) return;
+    kind=site==9001 ? 2 : 1;
+    const uint32_t pc=atomic_load_explicit(
+        kind==2 ? &p3_write_pc : &p3_read_pc,memory_order_relaxed);
+    artwatch_events_record_field(
+        atomic_load_explicit(&p3_dex_id,memory_order_relaxed),
+        atomic_load_explicit(&p3_method_id,memory_order_relaxed),
+        atomic_load_explicit(&p3_field_id,memory_order_relaxed),
+        pc,(uint32_t)kind,5u,(uint64_t)(int64_t)value);
+  } else if (kind!=1 && kind!=2) {
+    return;
   }
   uint32_t index = atomic_fetch_add_explicit(&next_index, 1u,
                                              memory_order_relaxed);

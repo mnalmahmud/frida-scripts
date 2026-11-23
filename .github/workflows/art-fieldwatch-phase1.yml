@@ -40,9 +40,9 @@ jobs:
       matrix:
         include:
           - api: 33
-            variant: debug
-          - api: 33
             variant: release
+          - api: 33
+            variant: debug
           - api: 34
             variant: debug
     env:
@@ -51,7 +51,7 @@ jobs:
       ARTWATCH_LOG_DIR: /tmp/artwatch-logs
       ARTWATCH_REQUIRE_JIT: '1'
       ARTWATCH_SHADOW_SHIM: ${{ matrix.api == 33 && '1' || '0' }}
-      ARTWATCH_P3_INJECT: ${{ matrix.api == 33 && matrix.variant == 'debug' && '1' || '0' }}
+      ARTWATCH_P3_INJECT: ${{ matrix.api == 33 && '1' || '0' }}
     steps:
       - uses: actions/checkout@v4
       # Emulator 37.3+ refuses -accel off without an explicit TCG override.
@@ -118,7 +118,6 @@ jobs:
           apk="art-fieldwatch-phase1/test/app/build/outputs/apk/$ARTWATCH_BUILD_VARIANT/app-$ARTWATCH_BUILD_VARIANT.apk"
           unzip -l "$apk" | grep 'lib/x86_64/libartwatch_shadow.so'
           unzip -l "$apk" | grep 'lib/x86_64/libartwatch_events.so'
-          unzip -l "$apk" | grep 'lib/x86_64/libartwatch_jvmti.so'
       - name: Record compiled fixture DEX for D8 comparison
         run: bash art-fieldwatch-phase1/ci/dex-inventory.sh
       - run: python3 -m pip install 'frida==17.27.1'

@@ -182,7 +182,7 @@ function loadPassiveShadow() {
       cloneTemplate: exported('artwatch_shadow_clone_template_invoke','int',
         ['pointer','pointer','pointer','pointer','uint','uint','pointer']),
       cloneBefore: exported('artwatch_shadow_clone_invoke_before','int',
-        ['pointer','pointer','pointer','uint','uint','pointer','pointer','int','pointer'])
+        ['pointer','pointer','pointer','uint','uint','pointer','pointer','int','pointer','pointer','pointer'])
     };
     send({type:'artwatch-shadow-init',ready:true,source:'native',
       buildIdVerified:true,mutable:false});
@@ -1333,8 +1333,10 @@ function attachP3CloneCanary(compiler) {
   const invokeVt=getExport(compiler,INVOKE_VTABLE);
   const getVt=getExport(compiler,'_ZTVN3art17HInstanceFieldGetE');
   const setVt=getExport(compiler,'_ZTVN3art17HInstanceFieldSetE');
-  if (!site || !insert || !copyEnv || !invokeVt || !getVt || !setVt)
-    return false;
+  const replaceInput=getExport(compiler,'_ZN3art12HInstruction12ReplaceInputEPS0_m');
+  const intVt=getExport(compiler,'_ZTVN3art12HIntConstantE');
+  if (!site || !insert || !copyEnv || !invokeVt || !getVt || !setVt ||
+      !replaceInput || !intVt) return false;
   let cloning=false;
   const successfulKinds=new Set();
   let successfulMethod=null;
@@ -1353,6 +1355,9 @@ function attachP3CloneCanary(compiler) {
         if (!shadowShim) loadPassiveShadow();
         if (!shadowShim || !shadowShim.cloneBefore ||
             !shadowShim.instructionDexPc) return;
+        // Exact runtime ELF gate has already passed. ArtMethod's
+        // dex_method_index follows the 32-bit class root and access flags.
+        if (ptr(active.method).add(8).readU32()!==fixture.carrierMethodIndex) return;
         const node=args[0];
         const size=Process.pointerSize;
         try {
@@ -1369,21 +1374,7 @@ function attachP3CloneCanary(compiler) {
           if (successfulKinds.has(kind)) return;
           const fieldVt=isWrite?setVt:getVt;
           const fieldPc=isWrite?fixture.setDexPc:fixture.getDexPc;
-          if (isRead) {
-            // Read case remains the verified adjacent get -> invoke path.
-            const previous=node.add(size).readPointer();
-            if (previous.isNull() ||
-                !previous.readPointer().equals(fieldVt.address.add(2*size)))
-              return;
-            if (shadowShim.instructionDexPc(previous,fieldVt.address,pc)!==1 ||
-                pc.readU32()!==fieldPc) return;
-          }
-          // For stores, ART can insert an HIntConstant between iput and
-          // invoke. The build-ID-gated native routine walks and verifies
-          // up to eight reciprocal links in the same HBasicBlock.
-          // Same-graph clone immediately before original invoke.
-          // No HInstructionBuilder state is required, so this also works
-          // when ART inlines AppendInstruction.
+          // Native shim proves value inputs and reciprocal same-block links.
           attempts++;
           cloning=true;
           try {
@@ -1392,7 +1383,7 @@ function attachP3CloneCanary(compiler) {
             const rc=shadowShim.cloneBefore(node,
               fieldVt.address,invokeVt.address,
               fieldPc,invokePc,insert.address,copyEnv.address,
-              isWrite?2:1,cloneOut);
+              isWrite?2:1,cloneOut,replaceInput.address,intVt.address);
             const cloned=rc===1 ? cloneOut.readPointer() : ptr(0);
             send({type:'artwatch-p3-clone',rc,method:active.method,
               kind,attempt:attempts,trigger:'invoke_accept',
