@@ -85,6 +85,8 @@ void JNICALL OnRead(jvmtiEnv* ti,JNIEnv* env,jthread,jmethodID method,jlocation 
   Dealloc(ti,name);Dealloc(ti,sig);
   // JNI sampling is only a best-effort value demonstration. The JVMTI read
   // callback has no exact value parameter and cannot prove race-free reads.
+  // Prevent JNI Get*Field from recursively triggering another field callback.
+  in_callback=true;
   jvalue value={};
   switch(type) {
     case 'I':
@@ -96,9 +98,10 @@ void JNICALL OnRead(jvmtiEnv* ti,JNIEnv* env,jthread,jmethodID method,jlocation 
     case 'Z':
       value.z=object?env->GetBooleanField(object,field):env->GetStaticBooleanField(klass,field);
       break;
-    default: return;
+    default: in_callback=false;return;
   }
-  if (env->ExceptionCheck()) {env->ExceptionClear();return;}
+  if (env->ExceptionCheck()) {env->ExceptionClear();in_callback=false;return;}
+  in_callback=false;
   Record(ti,method,location,klass,field,1u,value,type);
 }
 void Watch(jvmtiEnv* ti,JNIEnv* env,jclass klass) {
