@@ -14,6 +14,10 @@ public final class FieldEventSink {
   public static final int SITE_READ_VALUE = 9002;
 
   public static native void recordInt(int site, int kind, int value);
+  public static native void recordFieldInt(int dexId, int methodId,
+      int fieldId, int dexPc, int kind, int value);
+  public static native void resetFieldMeta();
+  public static native int fieldMetaCount();
   public static native void reset();
   public static native int eventCount();
   public static native boolean p3Enabled();

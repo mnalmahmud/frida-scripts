@@ -34,7 +34,7 @@ echo "Native shadow library staged for APK packaging: $jni_dir"
   art-fieldwatch-phase1/native/runtime-events.c \
   -o "$out/libartwatch_events.so"
 readelf -Ws "$out/libartwatch_events.so" |
-  grep -E '(artwatch_events_(snapshot|p3_snapshot|record_field|field_snapshot|p3_field_snapshot|configure_p3)|Java_com_example_artfieldwatch_FieldEventSink_(recordInt|reset|eventCount|p3Enabled|p3Verified))' |
+  grep -E '(artwatch_events_(snapshot|p3_snapshot|record_field|field_snapshot|p3_field_snapshot|configure_p3)|Java_com_example_artfieldwatch_FieldEventSink_(recordInt|recordFieldInt|reset|resetFieldMeta|fieldMetaCount|eventCount|p3Enabled|p3Verified))' |
   tee "$out/runtime-events-exports.txt"
 cp "$out/libartwatch_events.so" "$jni_dir/libartwatch_events.so"
 echo "Runtime event library staged for APK packaging: $jni_dir"

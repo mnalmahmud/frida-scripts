@@ -34,6 +34,7 @@ def main():
     runtime_snapshot = None
     p3_snapshot = None
     field_snapshot = None
+    direct_abi_snapshot = None
     try:
         source = (BASE/'jit-boundary-probe.js').read_text()
         sink_inventory = LOG_DIR / ('p3-sink-method-' +
@@ -62,6 +63,9 @@ def main():
         time.sleep(30 if os.environ.get('ARTWATCH_BUILD_VARIANT') == 'release' else 20)
         if os.environ.get('ARTWATCH_SHADOW_SHIM') == '1':
             runtime_snapshot = script.exports_sync.runtimeevents()
+            direct_abi_snapshot = script.exports_sync.fieldmeta()
+            (LOG_DIR/'direct-abi-events.json').write_text(
+                json.dumps(direct_abi_snapshot,indent=2))
             if os.environ.get('ARTWATCH_P3_INJECT') == '1':
                 p3_snapshot = script.exports_sync.p3events()
                 field_snapshot = script.exports_sync.p3fieldmeta()
@@ -152,6 +156,24 @@ def main():
             raise AssertionError('P3 raw-field canary must produce zero native events')
         if logs.stdout.index(canary_marker) >= logs.stdout.find('RUNTIME_EVENTS_DONE'):
             raise AssertionError('P3 negative control did not precede the P2 fixture')
+        if 'DIRECT_ABI_DONE count=4 checksum=103' not in logs.stdout:
+            raise AssertionError('Direct six-int native ABI fixture failed')
+        if not direct_abi_snapshot or direct_abi_snapshot.get('ready') is not True:
+            raise AssertionError('Direct six-int native ABI snapshot unavailable')
+        records_abi = direct_abi_snapshot.get('events',[])
+        values_abi = [(-11,2,17,3,7),(-11,1,17,3,9),
+                      (42,2,18,4,11),(42,1,18,4,13)]
+        if direct_abi_snapshot.get('total') != 4 or (
+             direct_abi_snapshot.get('dropped') != 0 or len(records_abi) != 4):
+            raise AssertionError('Direct six-int native ABI count mismatch')
+        for i,(value,kind,field_id,method_id,dex_pc) in enumerate(values_abi):
+            expected_abi = {
+                'seq':i+1,'dexId':0,'methodId':method_id,'fieldId':field_id,
+                'dexPc':dex_pc,'kind':kind,'type':5,
+                'valueBits':f'0x{value & ((1<<64)-1):016x}'}
+            if records_abi[i] != expected_abi:
+                raise AssertionError(f'Direct JNI ABI record invalid: {records_abi[i]}')
+        record('host','PASS: direct six-int JNI ABI, four exact field records')
         if 'RUNTIME_EVENTS_DONE count=256' not in logs.stdout or (
              'nullCheck=true' not in logs.stdout):
             raise AssertionError('Native runtime field event workload did not complete')

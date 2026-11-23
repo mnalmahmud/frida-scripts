@@ -64,6 +64,11 @@ public final class MainActivity extends Activity {
      Log.i("ARTWATCH_CI","RUNTIME_EVENTS_DONE count=256 checksum=" +
            runtimeChecksum + " nullCheck=true");
      accumulator += runtimeChecksum;
+     // Explicit transport-only ABI check. NOT a compiler-injection result.
+     int abiChecksum = DirectAbiTarget.exercise();
+     Log.i("ARTWATCH_CI","DIRECT_ABI_DONE count=" +
+           FieldEventSink.fieldMetaCount() + " checksum=" + abiChecksum);
+     accumulator += abiChecksum;
     }
     Log.i("ARTWATCH_CI","WARMUP_DONE checksum=" + accumulator);
    } catch (Throwable t) {

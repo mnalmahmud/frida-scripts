@@ -224,6 +224,16 @@ static void reset_detailed_events(void) {
   for(uint32_t i=0;i<FIELD_METADATA_CAPACITY;i++)
     atomic_store_explicit(&detailed_ready[i],0u,memory_order_relaxed);
 }
+JNIEXPORT void JNICALL
+Java_com_example_artfieldwatch_FieldEventSink_resetFieldMeta(JNIEnv *env,jclass cls) {
+  (void)env; (void)cls;
+  reset_detailed_events();
+}
+JNIEXPORT jint JNICALL
+Java_com_example_artfieldwatch_FieldEventSink_fieldMetaCount(JNIEnv *env,jclass cls) {
+  (void)env; (void)cls;
+  return (jint)atomic_load_explicit(&detailed_count,memory_order_acquire);
+}
 static int archive_p3_field_metadata(void) {
   if (atomic_load_explicit(&detailed_count,memory_order_acquire)!=256u ||
       atomic_load_explicit(&detailed_dropped,memory_order_acquire)!=0u ||
@@ -261,6 +271,18 @@ EVENT_EXPORT void artwatch_events_record_field(
     .dex_pc=dex_pc, .kind=kind, .type=type, .bits=bits
   };
   atomic_store_explicit(&detailed_ready[slot],1u,memory_order_release);
+}
+// Exact six-int ABI called by the source-matched ART direct injector.
+// Signed int32 values are sign-extended into the 64-bit transport.
+JNIEXPORT void JNICALL
+Java_com_example_artfieldwatch_FieldEventSink_recordFieldInt(
+    JNIEnv *env,jclass cls,jint dex_id,jint method_id,jint field_id,
+    jint dex_pc,jint kind,jint value) {
+  (void)env; (void)cls;
+  if (dex_id<0 || method_id<0 || field_id<0 || dex_pc<0) return;
+  artwatch_events_record_field((uint32_t)dex_id,(uint32_t)method_id,
+    (uint32_t)field_id,(uint32_t)dex_pc,(uint32_t)kind,5u,
+    (uint64_t)(int64_t)(int32_t)value);
 }
 EVENT_EXPORT int artwatch_events_field_snapshot(char *out,uint32_t length) {
   if (out==NULL || length<128u) return 0;
