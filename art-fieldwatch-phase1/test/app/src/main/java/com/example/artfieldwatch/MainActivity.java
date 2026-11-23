@@ -23,6 +23,16 @@ public final class MainActivity extends Activity {
     System.loadLibrary("artwatch_events");
     Log.i("ARTWATCH_CI","SHADOW_LIB_LOADED=true");
     Log.i("ARTWATCH_CI","EVENT_LIB_LOADED=true");
+    if (appDebuggable) {
+     try {
+      android.os.Debug.attachJvmtiAgent(
+        getApplicationInfo().nativeLibraryDir + "/libartwatch_jvmti.so",
+        "Lcom/example/artfieldwatch/JvmtiTarget;", getClassLoader());
+      Log.i("ARTWATCH_CI","JVMTI_ATTACH=true");
+     } catch (Throwable failure) {
+      Log.e("ARTWATCH_CI","JVMTI_ATTACH_FAILED",failure);
+     }
+    }
    } catch (UnsatisfiedLinkError e) {
     Log.e("ARTWATCH_CI","SHADOW_LIB_LOAD_FAILED",e);
    }
@@ -73,6 +83,11 @@ public final class MainActivity extends Activity {
      Log.i("ARTWATCH_CI","PRIMITIVE_ABI_DONE count=" +
            FieldEventSink.fieldMetaCount() + " checksum=" + primitiveChecksum);
      accumulator += primitiveChecksum;
+     if (appDebuggable) {
+      int watchChecksum = JvmtiTarget.exercise(64);
+      Log.i("ARTWATCH_CI","JVMTI_NO_TEMPLATE_DONE checksum=" + watchChecksum);
+      accumulator += watchChecksum;
+     }
     }
     Log.i("ARTWATCH_CI","WARMUP_DONE checksum=" + accumulator);
    } catch (Throwable t) {

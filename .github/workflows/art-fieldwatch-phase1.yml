@@ -118,6 +118,7 @@ jobs:
           apk="art-fieldwatch-phase1/test/app/build/outputs/apk/$ARTWATCH_BUILD_VARIANT/app-$ARTWATCH_BUILD_VARIANT.apk"
           unzip -l "$apk" | grep 'lib/x86_64/libartwatch_shadow.so'
           unzip -l "$apk" | grep 'lib/x86_64/libartwatch_events.so'
+          unzip -l "$apk" | grep 'lib/x86_64/libartwatch_jvmti.so'
       - name: Record compiled fixture DEX for D8 comparison
         run: bash art-fieldwatch-phase1/ci/dex-inventory.sh
       - run: python3 -m pip install 'frida==17.27.1'

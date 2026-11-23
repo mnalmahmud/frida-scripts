@@ -1562,6 +1562,16 @@ function main() {
 // Host-facing runtime event transport. Does not rely on compiler tracing.
 // This is a real JNI event recorder populated by executed application code.
 rpc.exports = {
+  jvmtievents() {
+    const module=Process.findModuleByName('libartwatch_jvmti.so');
+    if (!module) return {ready:false,reason:'JVMTI agent not loaded'};
+    const address=module.findExportByName('artwatch_jvmti_snapshot');
+    if (!address) return {ready:false,reason:'JVMTI snapshot export absent'};
+    const fn=new NativeFunction(address,'int',['pointer','uint']);
+    const buffer=Memory.alloc(65536);
+    if (fn(buffer,65536)!==1) return {ready:false,reason:'JVMTI snapshot incomplete'};
+    return {ready:true,...JSON.parse(buffer.readUtf8String())};
+  },
   p3fieldmeta() {
     const module = Process.findModuleByName('libartwatch_events.so');
     if (!module) return {ready:false,reason:'native event module not loaded'};
