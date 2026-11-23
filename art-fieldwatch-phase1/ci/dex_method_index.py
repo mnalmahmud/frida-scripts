@@ -179,7 +179,12 @@ def canary_pcs(data, sink_idx):
                     not (candidates_set[0] < candidates_invoke[0] <
                          candidates_get[0] < candidates_invoke[1])):
                     raise ValueError(f"bad P3 templates: sets={candidates_set} gets={candidates_get} invokes={candidates_invoke}")
+                put_field = u16(data, insns_start + 2*(candidates_set[0] + 1))
+                get_field = u16(data, insns_start + 2*(candidates_get[0] + 1))
+                if put_field != get_field:
+                    raise ValueError("P3 template accesses different DEX fields")
                 found.append({"carrierMethodIndex":method_index,
+                              "fieldIndex":put_field,
                               "setDexPc":candidates_set[0],
                               "writeInvokeDexPc":candidates_invoke[0],
                               "getDexPc":candidates_get[0],
@@ -196,7 +201,7 @@ def apk_sink_method(apk):
                            (x.startswith("classes") and x.endswith(".dex") and
                             x[7:-4].isdigit()))
         matches = []
-        for name in dex_names:
+        for dex_id, name in enumerate(dex_names):
             data = archive.read(name)
             try:
                 idx = sink_method_index(data)
@@ -210,7 +215,8 @@ def apk_sink_method(apk):
                 if "expected one P3 carrier method, found 0" in str(e):
                     continue
                 raise
-            matches.append({"dex": name, "methodIndex": idx,
+            matches.append({"dex": name, "dexId":dex_id,
+                            "methodIndex": idx,
                             **pcs,
                             "sha256": hashlib.sha256(data).hexdigest()})
         if len(matches) != 1:

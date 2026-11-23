@@ -198,10 +198,10 @@ def inventory(apk):
                      (n.startswith("classes") and n.endswith(".dex") and n[7:-4].isdigit()))
         if not names: raise ValueError("APK has no DEX")
         dex_files=[]
-        for name in names:
+        for dex_id,name in enumerate(names):
             dex=Dex(z.read(name),name)
             sites=dex.sites()
-            dex_files.append({"name":name,"sha256":dex.shasum,
+            dex_files.append({"dexId":dex_id,"name":name,"sha256":dex.shasum,
                               "fieldAccesses":sites,"count":len(sites)})
         return {"schemaVersion":1,"apk":Path(apk).name,
                 "totalFieldSites":sum(d["count"] for d in dex_files),
