@@ -310,6 +310,6 @@ EVENT_EXPORT int artwatch_events_p3_field_snapshot(char *out,uint32_t length) {
     used+=(size_t)n;
   }
   if (used+3u>length) return 0;
-  out[used++]=']';out[used++]='}';out[used]='\\0';
+  out[used++]=']';out[used++]='}';out[used]='\0';
   return 1;
 }
