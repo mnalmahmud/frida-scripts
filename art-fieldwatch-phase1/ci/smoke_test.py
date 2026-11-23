@@ -36,6 +36,7 @@ def main():
     p3_snapshot = None
     field_snapshot = None
     direct_abi_snapshot = None
+    jvmti_snapshot = None
     try:
         source = (BASE/'jit-boundary-probe.js').read_text()
         sink_inventory = LOG_DIR / ('p3-sink-method-' +
@@ -65,6 +66,12 @@ def main():
         if os.environ.get('ARTWATCH_SHADOW_SHIM') == '1':
             runtime_snapshot = script.exports_sync.runtimeevents()
             direct_abi_snapshot = script.exports_sync.fieldmeta()
+            if os.environ.get('ARTWATCH_BUILD_VARIANT','debug') == 'debug':
+                jvmti_snapshot = script.exports_sync.jvmtievents()
+                (LOG_DIR/'jvmti-events.json').write_text(
+                    json.dumps(jvmti_snapshot,indent=2))
+                record('host',f'JVMTI watched={jvmti_snapshot.get("watched")} '
+                       f'events={jvmti_snapshot.get("total")}')
             (LOG_DIR/'direct-abi-events.json').write_text(
                 json.dumps(direct_abi_snapshot,indent=2))
             if os.environ.get('ARTWATCH_P3_INJECT') == '1':
@@ -179,6 +186,25 @@ def main():
         if 'DIRECT_ABI_DONE count=4 checksum=103' not in logs.stdout or (
              'PRIMITIVE_ABI_DONE count=14 checksum=61' not in logs.stdout):
             raise AssertionError('Primitive ABI completion markers missing')
+        if variant == 'debug':
+            if 'JVMTI_ATTACH=true' not in logs.stdout:
+                raise AssertionError('JVMTI agent did not attach')
+            if 'JVMTI_NO_TEMPLATE_DONE checksum=32' not in logs.stdout:
+                raise AssertionError('No-template field workload failed')
+            if not jvmti_snapshot or jvmti_snapshot.get('ready') is not True:
+                raise AssertionError('JVMTI snapshot unavailable')
+            if jvmti_snapshot.get('watched',0) < 2:
+                raise AssertionError('JVMTI watched fewer than two fields')
+            events_jvmti = jvmti_snapshot.get('events', [])
+            if not {1,2}.issubset({e.get('kind') for e in events_jvmti}):
+                raise AssertionError('JVMTI missing field read/write events')
+            if not {'instanceValue','staticValue'}.issubset(
+                {e.get('field') for e in events_jvmti}):
+                raise AssertionError('JVMTI missing instance/static fields')
+            if 'exercise' not in {e.get('method') for e in events_jvmti}:
+                raise AssertionError('JVMTI caller method missing')
+            record('host','PASS: no-template instance and static field '
+                   'read/write callbacks with method/field identities')
         if 'DIRECT_ABI_DONE count=4 checksum=103' not in logs.stdout:
             raise AssertionError('Direct six-int native ABI fixture failed')
         if not direct_abi_snapshot or direct_abi_snapshot.get('ready') is not True:
