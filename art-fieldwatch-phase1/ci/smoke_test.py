@@ -176,6 +176,9 @@ def main():
             raise AssertionError('P3 raw-field canary must produce zero native events')
         if logs.stdout.index(canary_marker) >= logs.stdout.find('RUNTIME_EVENTS_DONE'):
             raise AssertionError('P3 negative control did not precede the P2 fixture')
+        if 'DIRECT_ABI_DONE count=4 checksum=103' not in logs.stdout or (
+             'PRIMITIVE_ABI_DONE count=14 checksum=61' not in logs.stdout):
+            raise AssertionError('Primitive ABI completion markers missing')
         if 'DIRECT_ABI_DONE count=4 checksum=103' not in logs.stdout:
             raise AssertionError('Direct six-int native ABI fixture failed')
         if not direct_abi_snapshot or direct_abi_snapshot.get('ready') is not True:
@@ -183,17 +186,35 @@ def main():
         records_abi = direct_abi_snapshot.get('events',[])
         values_abi = [(-11,2,17,3,7),(-11,1,17,3,9),
                       (42,2,18,4,11),(42,1,18,4,13)]
-        if direct_abi_snapshot.get('total') != 4 or (
-             direct_abi_snapshot.get('dropped') != 0 or len(records_abi) != 4):
-            raise AssertionError('Direct six-int native ABI count mismatch')
-        for i,(value,kind,field_id,method_id,dex_pc) in enumerate(values_abi):
+        long_bits = (-0x102030405060708) & ((1<<64)-1)
+        values_abi.extend([
+          (0,5,21,2,2,6,long_bits),
+          (0,5,21,4,1,6,long_bits),
+          (0,5,22,6,2,7,0x80000000),
+          (0,5,22,8,1,7,0x80000000),
+          (0,5,23,10,2,8,0x8000000000000000),
+          (0,5,23,12,1,8,0x8000000000000000),
+          (0,6,24,14,1,1,1),
+          (0,6,25,16,2,2,(1<<64)-128),
+          (0,6,26,18,1,3,0xd7ff),
+          (0,6,27,20,2,4,(1<<64)-32768)
+        ])
+        if direct_abi_snapshot.get('total') != 14 or (
+             direct_abi_snapshot.get('dropped') != 0 or len(records_abi) != 14):
+            raise AssertionError('Direct primitive JNI ABI count mismatch')
+        for i,row in enumerate(values_abi):
+            if len(row) == 5:
+                value,kind,field_id,method_id,dex_pc = row
+                row = (0,method_id,field_id,dex_pc,kind,5,value & ((1<<64)-1))
+            dex_id,method_id,field_id,dex_pc,kind,typ,bits = row
             expected_abi = {
-                'seq':i+1,'dexId':0,'methodId':method_id,'fieldId':field_id,
-                'dexPc':dex_pc,'kind':kind,'type':5,
-                'valueBits':f'0x{value & ((1<<64)-1):016x}'}
+                'seq':i+1,'dexId':dex_id,'methodId':method_id,'fieldId':field_id,
+                'dexPc':dex_pc,'kind':kind,'type':typ,
+                'valueBits':f'0x{bits:016x}'}
             if records_abi[i] != expected_abi:
-                raise AssertionError(f'Direct JNI ABI record invalid: {records_abi[i]}')
-        record('host','PASS: direct six-int JNI ABI, four exact field records')
+                raise AssertionError(f'Direct primitive JNI ABI record invalid: {records_abi[i]}')
+        record('host','PASS: 14 exact primitive JNI field records including '
+               'negative long, negative-zero float/double, boolean, byte, char, short')
         if 'RUNTIME_EVENTS_DONE count=256' not in logs.stdout or (
              'nullCheck=true' not in logs.stdout):
             raise AssertionError('Native runtime field event workload did not complete')

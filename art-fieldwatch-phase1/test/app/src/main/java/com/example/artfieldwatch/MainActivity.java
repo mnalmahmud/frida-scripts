@@ -69,6 +69,10 @@ public final class MainActivity extends Activity {
      Log.i("ARTWATCH_CI","DIRECT_ABI_DONE count=" +
            FieldEventSink.fieldMetaCount() + " checksum=" + abiChecksum);
      accumulator += abiChecksum;
+     int primitiveChecksum = PrimitiveAbiTarget.exercise();
+     Log.i("ARTWATCH_CI","PRIMITIVE_ABI_DONE count=" +
+           FieldEventSink.fieldMetaCount() + " checksum=" + primitiveChecksum);
+     accumulator += primitiveChecksum;
     }
     Log.i("ARTWATCH_CI","WARMUP_DONE checksum=" + accumulator);
    } catch (Throwable t) {

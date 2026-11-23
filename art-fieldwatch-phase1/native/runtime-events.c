@@ -284,6 +284,64 @@ Java_com_example_artfieldwatch_FieldEventSink_recordFieldInt(
     (uint32_t)field_id,(uint32_t)dex_pc,(uint32_t)kind,5u,
     (uint64_t)(int64_t)(int32_t)value);
 }
+
+static int valid_field_ids(jint dex,jint method,jint field,jint pc) {
+  return dex>=0 && method>=0 && field>=0 && pc>=0;
+}
+// Primitive value transfer is explicit: no native re-read, reflection,
+// heap allocation, or precision-losing float-to-JSON numeric conversion.
+JNIEXPORT void JNICALL
+Java_com_example_artfieldwatch_FieldEventSink_recordFieldLong(
+    JNIEnv *env,jclass cls,jint dex,jint method,jint field,jint pc,jint kind,jlong value) {
+  (void)env;(void)cls;
+  if (!valid_field_ids(dex,method,field,pc)) return;
+  artwatch_events_record_field((uint32_t)dex,(uint32_t)method,(uint32_t)field,
+    (uint32_t)pc,(uint32_t)kind,6u,(uint64_t)(int64_t)value);
+}
+JNIEXPORT void JNICALL
+Java_com_example_artfieldwatch_FieldEventSink_recordFieldFloat(
+    JNIEnv *env,jclass cls,jint dex,jint method,jint field,jint pc,jint kind,jfloat value) {
+  (void)env;(void)cls;
+  if (!valid_field_ids(dex,method,field,pc)) return;
+  uint32_t raw=0;
+  _Static_assert(sizeof(jfloat)==sizeof(raw),"JNI float is not 32-bit");
+  memcpy(&raw,&value,sizeof(raw));
+  artwatch_events_record_field((uint32_t)dex,(uint32_t)method,(uint32_t)field,
+    (uint32_t)pc,(uint32_t)kind,7u,(uint64_t)raw);
+}
+JNIEXPORT void JNICALL
+Java_com_example_artfieldwatch_FieldEventSink_recordFieldDouble(
+    JNIEnv *env,jclass cls,jint dex,jint method,jint field,jint pc,jint kind,jdouble value) {
+  (void)env;(void)cls;
+  if (!valid_field_ids(dex,method,field,pc)) return;
+  uint64_t raw=0;
+  _Static_assert(sizeof(jdouble)==sizeof(raw),"JNI double is not 64-bit");
+  memcpy(&raw,&value,sizeof(raw));
+  artwatch_events_record_field((uint32_t)dex,(uint32_t)method,(uint32_t)field,
+    (uint32_t)pc,(uint32_t)kind,8u,raw);
+}
+JNIEXPORT void JNICALL
+Java_com_example_artfieldwatch_FieldEventSink_recordFieldNarrow(
+    JNIEnv *env,jclass cls,jint dex,jint method,jint field,jint pc,
+    jint kind,jint type,jint value) {
+  (void)env;(void)cls;
+  if (!valid_field_ids(dex,method,field,pc)) return;
+  uint64_t bits=0;
+  switch(type) {
+    case 1:
+      if (value!=0 && value!=1) return;
+      bits=(uint64_t)(uint32_t)value;
+      break;
+    case 2: bits=(uint64_t)(int64_t)(int8_t)value;break;
+    case 3: bits=(uint64_t)(uint16_t)value;break;
+    case 4: bits=(uint64_t)(int64_t)(int16_t)value;break;
+    case 5: bits=(uint64_t)(int64_t)(int32_t)value;break;
+    default:return;
+  }
+  artwatch_events_record_field((uint32_t)dex,(uint32_t)method,(uint32_t)field,
+    (uint32_t)pc,(uint32_t)kind,(uint32_t)type,bits);
+}
+
 EVENT_EXPORT int artwatch_events_field_snapshot(char *out,uint32_t length) {
   if (out==NULL || length<128u) return 0;
   const uint32_t total=atomic_load_explicit(&detailed_count,memory_order_acquire);
