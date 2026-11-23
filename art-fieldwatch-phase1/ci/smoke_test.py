@@ -64,7 +64,7 @@ def main():
             runtime_snapshot = script.exports_sync.runtimeevents()
             if os.environ.get('ARTWATCH_P3_INJECT') == '1':
                 p3_snapshot = script.exports_sync.p3events()
-                field_snapshot = script.exports_sync.fieldmeta()
+                field_snapshot = script.exports_sync.p3fieldmeta()
                 (LOG_DIR/'p3-field-metadata.json').write_text(
                     json.dumps(field_snapshot,indent=2))
                 record('host',f'P3 metadata events ready={field_snapshot.get("ready")} '

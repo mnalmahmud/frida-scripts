@@ -25,6 +25,8 @@ static atomic_uint p3_sentinel_sequence = 0;
 // Frozen after P3 verification, before the independent P2 workload resets events.
 static struct field_event p3_verified_events[256];
 static atomic_uint p3_archive_ready = 0;
+static void reset_detailed_events(void);
+static int archive_p3_field_metadata(void);
 // P3's concrete DEX field identity is installed only after the exact cloned
 // invoke nodes survived backend emission. This metadata is immutable while
 // the measured fixture runs; it does not establish general app-wide coverage.
@@ -72,6 +74,9 @@ Java_com_example_artfieldwatch_FieldEventSink_p3Verified(JNIEnv *env,jclass cls)
         events[2u*i+1u].value!=(int32_t)(7u+3u*i))
       return JNI_FALSE;
   }
+  // P3 completion must verify both legacy transport AND typed DEX metadata.
+  // Archive before P2 resets their independent live measurement buffers.
+  if (!archive_p3_field_metadata()) return JNI_FALSE;
   memcpy(p3_verified_events, events, sizeof(p3_verified_events));
   atomic_store_explicit(&p3_archive_ready, 1u, memory_order_release);
   return JNI_TRUE;
@@ -84,6 +89,7 @@ static void clear_events(void) {
   atomic_store_explicit(&next_index, 0, memory_order_relaxed);
   atomic_store_explicit(&dropped, 0, memory_order_relaxed);
   atomic_store_explicit(&p3_sentinel_sequence, 0, memory_order_relaxed);
+  reset_detailed_events();
   for (uint32_t i = 0; i < EVENT_CAPACITY; ++i)
     atomic_store_explicit(&ready[i], 0, memory_order_relaxed);
 }
@@ -209,6 +215,38 @@ static struct detailed_field_event detailed_events[FIELD_METADATA_CAPACITY];
 static atomic_uint detailed_ready[FIELD_METADATA_CAPACITY];
 static atomic_uint detailed_count = 0;
 static atomic_uint detailed_dropped = 0;
+// P3 validated snapshot survives later resets and the explicitly authored P2 workload.
+static struct detailed_field_event p3_detailed_verified[256];
+static atomic_uint p3_detailed_archive_ready = 0;
+static void reset_detailed_events(void) {
+  atomic_store_explicit(&detailed_count,0u,memory_order_relaxed);
+  atomic_store_explicit(&detailed_dropped,0u,memory_order_relaxed);
+  for(uint32_t i=0;i<FIELD_METADATA_CAPACITY;i++)
+    atomic_store_explicit(&detailed_ready[i],0u,memory_order_relaxed);
+}
+static int archive_p3_field_metadata(void) {
+  if (atomic_load_explicit(&detailed_count,memory_order_acquire)!=256u ||
+      atomic_load_explicit(&detailed_dropped,memory_order_acquire)!=0u ||
+      !atomic_load_explicit(&p3_metadata_ready,memory_order_acquire)) return 0;
+  const uint32_t dex=atomic_load_explicit(&p3_dex_id,memory_order_relaxed);
+  const uint32_t method=atomic_load_explicit(&p3_method_id,memory_order_relaxed);
+  const uint32_t field=atomic_load_explicit(&p3_field_id,memory_order_relaxed);
+  const uint32_t wpc=atomic_load_explicit(&p3_write_pc,memory_order_relaxed);
+  const uint32_t rpc=atomic_load_explicit(&p3_read_pc,memory_order_relaxed);
+  for(uint32_t i=0;i<256u;i++) {
+    if (atomic_load_explicit(&detailed_ready[i],memory_order_acquire)!=1u)
+      return 0;
+    const struct detailed_field_event *ev=&detailed_events[i];
+    const uint32_t kind=(i&1u)==0u ? 2u : 1u;
+    if (ev->dex_id!=dex || ev->method_id!=method || ev->field_id!=field ||
+        ev->kind!=kind || ev->dex_pc!=(kind==2u?wpc:rpc) ||
+        ev->type!=5u || ev->bits!=(uint64_t)(7u+3u*(i/2u)))
+      return 0;
+  }
+  memcpy(p3_detailed_verified,detailed_events,sizeof(p3_detailed_verified));
+  atomic_store_explicit(&p3_detailed_archive_ready,1u,memory_order_release);
+  return 1;
+}
 EVENT_EXPORT void artwatch_events_record_field(
     uint32_t dex_id, uint32_t method_id, uint32_t field_id,
     uint32_t dex_pc, uint32_t kind, uint32_t type, uint64_t bits) {
@@ -249,5 +287,29 @@ EVENT_EXPORT int artwatch_events_field_snapshot(char *out,uint32_t length) {
   }
   if (used+3u>length) return 0;
   out[used++]=']';out[used++]='}';out[used]='\0';
+  return 1;
+}
+
+EVENT_EXPORT int artwatch_events_p3_field_snapshot(char *out,uint32_t length) {
+  if (atomic_load_explicit(&p3_detailed_archive_ready,memory_order_acquire)!=1u ||
+      out==NULL || length<128u) return 0;
+  size_t used=0;
+  int n=snprintf(out,length,
+    "{\"version\":2,\"total\":256,\"dropped\":0,\"events\":[");
+  if (n<0 || (size_t)n>=length) return 0;
+  used+=(size_t)n;
+  for(uint32_t i=0;i<256u;i++) {
+    const struct detailed_field_event *e=&p3_detailed_verified[i];
+    n=snprintf(out+used,length-used,
+      "%s{\"seq\":%u,\"dexId\":%u,\"methodId\":%u,"
+      "\"fieldId\":%u,\"dexPc\":%u,\"kind\":%u,\"type\":%u,"
+      "\"valueBits\":\"0x%016llx\"}",i?",":"",
+      i+1u,e->dex_id,e->method_id,e->field_id,e->dex_pc,
+      e->kind,e->type,(unsigned long long)e->bits);
+    if (n<0 || (size_t)n>=length-used) return 0;
+    used+=(size_t)n;
+  }
+  if (used+3u>length) return 0;
+  out[used++]=']';out[used++]='}';out[used]='\\0';
   return 1;
 }
