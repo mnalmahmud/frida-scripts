@@ -99,6 +99,13 @@ static RejectReason InsertIntEventAfter(HGraph* graph,
     // its deoptimization state may describe a DIFFERENT DEX PC.
     return RejectReason::kNoEnvironment;
   }
+  if (graph->GetArtMethod() == nullptr ||
+      access->GetEnvironment()->GetMethod() != graph->GetArtMethod() ||
+      access->GetEnvironment()->GetParent() != nullptr) {
+    // Same DexFile alone does not distinguish an inlined callee from
+    // its compiled caller. An inlined method needs its own method ID.
+    return RejectReason::kOtherDex;
+  }
   HBasicBlock* block = access->GetBlock();
   if (block == nullptr || block->GetGraph() != graph ||
       access->IsControlFlow() || block->GetLastInstruction() == access) {
@@ -155,6 +162,12 @@ Result InsertAllIntFieldEvents(HGraph* graph, const Sink& sink) {
   if (graph == nullptr || !graph->IsInSsaForm() ||
       sink.dex_file == nullptr || sink.method == nullptr ||
       !sink.method->IsStatic() || !sink.method->IsNative()) {
+    return result;
+  }
+  if (sink.dex_file != &graph->GetDexFile()) {
+    // ART MethodReference indices are scoped to their DexFile. Refuse
+    // cross-DEX dispatch until verified against the target compiler.
+    ++result.mismatched_dex;
     return result;
   }
   // Avoid recursively instrumenting the sink itself.
