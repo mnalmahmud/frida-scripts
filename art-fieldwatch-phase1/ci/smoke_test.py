@@ -7,6 +7,7 @@ import sys
 import time
 from pathlib import Path
 import frida
+from resolve_field_events import resolve
 
 BASE = Path(__file__).resolve().parents[1]
 LOG_DIR = Path(os.environ.get('ARTWATCH_LOG_DIR','/tmp/artwatch-logs'))
@@ -145,6 +146,25 @@ def main():
                         e.get('dexPc') != pc or e.get('kind') != kind or
                         e.get('type') != 5 or e.get('valueBits') != expected_bits):
                         raise AssertionError(f'P3 metadata/value mismatch: {e}')
+            catalog = json.loads((LOG_DIR / (
+                'field-sites-' + variant + '.json')).read_text())
+            resolved_p3 = resolve(catalog, field_snapshot)
+            (LOG_DIR/'p3-resolved-field-events.json').write_text(
+                json.dumps(resolved_p3,indent=2))
+            if resolved_p3['eventCount'] != 256:
+                raise AssertionError('P3 full DEX metadata resolution lost field events')
+            for event in resolved_p3['events']:
+                if (event['methodClass'] !=
+                    'Lcom/example/artfieldwatch/FieldIRTarget;' or
+                    event['methodName'] != 'p3TemplateCarrierOn' or
+                    event['declaringClass'] !=
+                    'Lcom/example/artfieldwatch/FieldIRTarget;' or
+                    event['fieldName'] != 'value' or
+                    event['fieldType'] != 'I' or
+                    event['access'] != 'instance'):
+                    raise AssertionError(f'P3 runtime identity resolved to wrong DEX site: {event}')
+            record('host','PASS: 256 runtime P3 records resolved to exact '
+                   'DEX caller class/method, field name/type, and source metadata')
             record('host','PASS: 256 field events joined to exact DEX method, '
                    'field, PC, direction, int type and value bits')
             record('host','PASS: independently archived 256 P3 injected-context '
