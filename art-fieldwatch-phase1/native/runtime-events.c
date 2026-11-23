@@ -25,6 +25,29 @@ static atomic_uint p3_sentinel_sequence = 0;
 // Frozen after P3 verification, before the independent P2 workload resets events.
 static struct field_event p3_verified_events[256];
 static atomic_uint p3_archive_ready = 0;
+// P3's concrete DEX field identity is installed only after the exact cloned
+// invoke nodes survived backend emission. This metadata is immutable while
+// the measured fixture runs; it does not establish general app-wide coverage.
+static atomic_uint p3_dex_id, p3_method_id, p3_field_id;
+static atomic_uint p3_write_pc, p3_read_pc;
+static atomic_uint p3_metadata_ready;
+EVENT_EXPORT void artwatch_events_record_field(
+    uint32_t dex_id, uint32_t method_id, uint32_t field_id,
+    uint32_t dex_pc, uint32_t kind, uint32_t type, uint64_t bits);
+EVENT_EXPORT int artwatch_events_configure_p3(
+    uint32_t dex_id, uint32_t method_id, uint32_t field_id,
+    uint32_t write_pc, uint32_t read_pc) {
+  if (atomic_load_explicit(&p3_enabled,memory_order_acquire) ||
+      atomic_load_explicit(&p3_metadata_ready,memory_order_acquire))
+    return 0;
+  atomic_store_explicit(&p3_dex_id,dex_id,memory_order_relaxed);
+  atomic_store_explicit(&p3_method_id,method_id,memory_order_relaxed);
+  atomic_store_explicit(&p3_field_id,field_id,memory_order_relaxed);
+  atomic_store_explicit(&p3_write_pc,write_pc,memory_order_relaxed);
+  atomic_store_explicit(&p3_read_pc,read_pc,memory_order_relaxed);
+  atomic_store_explicit(&p3_metadata_ready,1u,memory_order_release);
+  return 1;
+}
 // Only the controlled fixture sets P3; ordinary P2 events are unchanged.
 EVENT_EXPORT void artwatch_events_set_p3(int enabled) {
   atomic_store_explicit(&p3_enabled, enabled ? 1u : 0u, memory_order_release);
@@ -87,6 +110,18 @@ Java_com_example_artfieldwatch_FieldEventSink_recordInt(
     if ((n & 1u)!=0u) return;
     site=(n & 2u)==0u ? 9001 : 9002;
     kind=(n & 2u)==0u ? 2 : 1;
+    // This P3 adapter still identifies the cloned call by validated
+    // clone-before-original ordering. The generic ABI itself does not
+    // require that sentinel scheme.
+    if (atomic_load_explicit(&p3_metadata_ready,memory_order_acquire)) {
+      const uint32_t pc=atomic_load_explicit(
+          kind==2 ? &p3_write_pc : &p3_read_pc,memory_order_relaxed);
+      artwatch_events_record_field(
+          atomic_load_explicit(&p3_dex_id,memory_order_relaxed),
+          atomic_load_explicit(&p3_method_id,memory_order_relaxed),
+          atomic_load_explicit(&p3_field_id,memory_order_relaxed),
+          pc,(uint32_t)kind,5u,(uint64_t)(int64_t)value);
+    }
   }
   uint32_t index = atomic_fetch_add_explicit(&next_index, 1u,
                                              memory_order_relaxed);

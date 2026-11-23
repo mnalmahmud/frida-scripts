@@ -287,6 +287,7 @@ function attach(layer, site) {
             p3PendingMethod = null;
             const module = Process.findModuleByName('libartwatch_events.so');
             const fn = module && module.findExportByName('artwatch_events_set_p3');
+            const configFn=module && module.findExportByName('artwatch_events_configure_p3');
             const proofs = ['write','read'].map(kind => {
               const node=state && state.p3ClonedNodes.get(kind);
               return {kind,node:node||null,
@@ -295,10 +296,25 @@ function attach(layer, site) {
             });
             const codegenProven=proofs.every(p => p.node && p.locations && p.emitted) &&
               proofs[0].node !== proofs[1].node;
-            if (succeeded && codegenProven && fn !== null) {
-              new NativeFunction(fn,'void',['int'])(1);
-              send({type:'artwatch-p3-compiled',method:this.method,
-                codegenSuccess:true,cloneProof:proofs});
+            const f=globalThis.__artwatchP3Fixture;
+            const metadataValid=f && ['dexId','carrierMethodIndex','fieldIndex',
+              'setDexPc','getDexPc'].every(k=>Number.isSafeInteger(f[k]) && f[k]>=0);
+            if (succeeded && codegenProven && fn !== null &&
+                configFn !== null && metadataValid) {
+              const configured=new NativeFunction(configFn,'int',
+                ['uint','uint','uint','uint','uint'])(
+                f.dexId,f.carrierMethodIndex,f.fieldIndex,f.setDexPc,f.getDexPc);
+              if (configured===1) {
+                new NativeFunction(fn,'void',['int'])(1);
+                send({type:'artwatch-p3-compiled',method:this.method,
+                  codegenSuccess:true,metadataConfigured:true,
+                  metadata:{dexId:f.dexId,methodId:f.carrierMethodIndex,
+                    fieldId:f.fieldIndex,writePc:f.setDexPc,readPc:f.getDexPc},
+                  cloneProof:proofs});
+              } else {
+                send({type:'artwatch-p3-clone-error',method:this.method,
+                  error:'P3 metadata configuration rejected'});
+              }
             } else {
               send({type:'artwatch-p3-clone-error',method:this.method,
                 error:'compiler completion, cloned invoke codegen, or event setter failed',

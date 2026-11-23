@@ -33,6 +33,7 @@ def main():
     session = device.attach(pid)
     runtime_snapshot = None
     p3_snapshot = None
+    field_snapshot = None
     try:
         source = (BASE/'jit-boundary-probe.js').read_text()
         sink_inventory = LOG_DIR / ('p3-sink-method-' +
@@ -63,6 +64,11 @@ def main():
             runtime_snapshot = script.exports_sync.runtimeevents()
             if os.environ.get('ARTWATCH_P3_INJECT') == '1':
                 p3_snapshot = script.exports_sync.p3events()
+                field_snapshot = script.exports_sync.fieldmeta()
+                (LOG_DIR/'p3-field-metadata.json').write_text(
+                    json.dumps(field_snapshot,indent=2))
+                record('host',f'P3 metadata events ready={field_snapshot.get("ready")} '
+                       f'total={field_snapshot.get("total")}')
                 (LOG_DIR/'p3-injected-events.json').write_text(
                     json.dumps(p3_snapshot,indent=2))
                 record('host',f'P3 compiled events ready={p3_snapshot.get("ready")} '
@@ -113,6 +119,30 @@ def main():
                     raise AssertionError(f'P3 incorrect write event at {i}: {write}')
                 if read != {'seq':2*i+2,'site':9002,'kind':1,'value':expected}:
                     raise AssertionError(f'P3 incorrect read event at {i}: {read}')
+            if not field_snapshot or field_snapshot.get('ready') is not True:
+                raise AssertionError('P3 detailed event metadata snapshot unavailable')
+            fixture = json.loads((LOG_DIR / (
+                'p3-sink-method-' + variant + '.json')).read_text())
+            records = field_snapshot.get('events', [])
+            if field_snapshot.get('total') != 256 or (
+                 field_snapshot.get('dropped') != 0 or len(records) != 256):
+                raise AssertionError('P3 field metadata event count/drops invalid')
+            for i in range(128):
+                expected = 7 + 3*i
+                for ordinal, kind, pc in (
+                    (2*i, 2, fixture['setDexPc']),
+                    (2*i+1, 1, fixture['getDexPc'])):
+                    e = records[ordinal]
+                    expected_bits = f'0x{expected:016x}'
+                    if (e.get('seq') != ordinal+1 or
+                        e.get('dexId') != fixture['dexId'] or
+                        e.get('methodId') != fixture['carrierMethodIndex'] or
+                        e.get('fieldId') != fixture['fieldIndex'] or
+                        e.get('dexPc') != pc or e.get('kind') != kind or
+                        e.get('type') != 5 or e.get('valueBits') != expected_bits):
+                        raise AssertionError(f'P3 metadata/value mismatch: {e}')
+            record('host','PASS: 256 field events joined to exact DEX method, '
+                   'field, PC, direction, int type and value bits')
             record('host','PASS: independently archived 256 P3 injected-context '
                    'events with exact values/order and zero drops')
         if logs.stdout.index(template_marker) >= logs.stdout.find('P3_CANARY_DONE'):
@@ -199,7 +229,8 @@ def main():
             if {v.get('kind') for v in successful} != {'write','read'} or (
                  None in nodes or len(nodes) != 2):
                 raise AssertionError(f'P3 did not return two distinct typed clone nodes: {successful}')
-            if len(p3_compiled) != 1 or p3_compiled[0].get('codegenSuccess') is not True:
+            if len(p3_compiled) != 1 or p3_compiled[0].get('codegenSuccess') is not True or (
+                 p3_compiled[0].get('metadataConfigured') is not True):
                 raise AssertionError(f'P3 compiler completion not proven: {p3_compiled}')
             proof = p3_compiled[0].get('cloneProof', [])
             if (len(proof) != 2 or {v.get('node') for v in proof} != nodes or
