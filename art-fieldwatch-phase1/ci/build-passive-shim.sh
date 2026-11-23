@@ -45,6 +45,7 @@ test -x "$cxx"
 test -f "${JAVA_HOME:?JAVA_HOME required}/include/jvmti.h"
 "$cxx" -std=c++17 -O2 -fPIC -fvisibility=hidden -fstack-protector-strong \
   -Wall -Wextra -Werror -shared -Wl,-z,relro -Wl,-z,now \
+  -I "$sdk/ndk/$version/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include" \
   -I "$JAVA_HOME/include" \
   art-fieldwatch-phase1/native/jvmti-fieldwatch.cc -llog \
   -o "$out/libartwatch_jvmti.so"
