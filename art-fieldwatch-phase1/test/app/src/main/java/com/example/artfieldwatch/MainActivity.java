@@ -26,7 +26,7 @@ public final class MainActivity extends Activity {
     if (appDebuggable) {
      try {
       android.os.Debug.attachJvmtiAgent(
-        getApplicationInfo().nativeLibraryDir + "/libartwatch_jvmti.so",
+        "libartwatch_jvmti.so",
         "Lcom/example/artfieldwatch/JvmtiTarget;", getClassLoader());
       Log.i("ARTWATCH_CI","JVMTI_ATTACH=true");
      } catch (Throwable failure) {
