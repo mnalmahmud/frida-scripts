@@ -630,3 +630,9 @@ The isolated test activity now starts idle and only executes field code
 when the host has attached and armed the opcode probe. The test hooks only the
 four actual integer field opcode slots and the two immediate return handlers,
 avoiding per-instruction overhead in unrelated move handlers during startup.
+
+A CI startup tombstone showed that instrumenting the nterp handlers before
+Android application initialization was unsafe. Hooks are now installed only
+on the host's explicit arm request after the separate process reaches an idle
+state. This is a safety gate, not yet proof that nterp instruction hooks execute
+correctly. If a hook triggers an ART crash or zero events, CI must fail.

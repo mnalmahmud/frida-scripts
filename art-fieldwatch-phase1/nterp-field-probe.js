@@ -20,6 +20,7 @@ let dropped = 0;
 let callbacks = 0;
 let ready = false;
 let armed = false;
+let attachVerifiedHooks = null;
 const fieldOps = new Set([0x52, 0x59, 0x60, 0x67]);
 const continuationOps = [0x0e, 0x0f];
 // The first continuation after a field access may be a move, nop, or return.
@@ -154,28 +155,42 @@ function install() {
       opcode, kind: target.kind, pc: pc.toString(),
       nextPc: pc.add(4), vreg: vregA, value});
   }
-  for (const opcode of installed) {
-    const address = base.add(opcode * 128);
-    const range = Process.findRangeByAddress(address);
-    if (!range || !range.protection.includes('x'))
-      throw new Error('nterp handler is not executable: 0x' + opcode.toString(16));
-    hooks.push(Interceptor.attach(address, {
-      onEnter() {
-        try { callback(opcode, this.context, this.threadId); }
-        catch (e) { recordDiagnostic('opcode 0x' + opcode.toString(16) + ': ' + e); }
-      }
-    }));
-  }
+  // Do not patch nterp before Android's process initialization finishes.
+  // The isolated test activity starts idle; the host explicitly arms before
+  // triggering its first field operation.
+  attachVerifiedHooks = function () {
+    for (const opcode of installed) {
+      const address = base.add(opcode * 128);
+      const range = Process.findRangeByAddress(address);
+      if (!range || !range.protection.includes('x'))
+        throw new Error('nterp handler not executable: 0x' + opcode.toString(16));
+      hooks.push(Interceptor.attach(address, {
+        onEnter() {
+          try { callback(opcode, this.context, this.threadId); }
+          catch (e) { recordDiagnostic('opcode 0x' + opcode.toString(16) + ': ' + e); }
+        }
+      }));
+    }
+  };
   ready = true;
   send({type: 'artwatch-nterp-init', ready: true,
-    buildId, handlerCount: hooks.length, moduleBase: art.base.toString(),
-    handlerTable: base.toString()});
+    buildId, candidateHandlers: installed.length, attachedHandlers: 0,
+    moduleBase: art.base.toString(), handlerTable: base.toString()});
 }
 rpc.exports = {
   arm() {
-    if (!ready || armed) return false;
-    armed = true;
-    return true;
+    if (!ready || armed || attachVerifiedHooks === null) return false;
+    try {
+      attachVerifiedHooks();
+      armed = true;
+      send({type:'artwatch-nterp-armed',handlerCount:hooks.length});
+      return true;
+    } catch (e) {
+      hooks.forEach(h => h.detach());
+      hooks.length = 0;
+      recordDiagnostic('Failed to arm nterp: ' + e);
+      return false;
+    }
   },
   snapshot() {
     return {ready, armed, callbacks, events: records.slice(), dropped,
