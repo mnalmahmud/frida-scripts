@@ -68,3 +68,8 @@ if ! python3 art-fieldwatch-phase1/ci/smoke_test.py; then
   adb logcat -d -t 1500 > "$ARTWATCH_LOG_DIR/logcat-failure.txt" || true
   exit 1
 fi
+
+# Independent public-Java-bridge oracle; no compiler mutation in this test.
+if [[ "$variant" == release && "${ARTWATCH_SHADOW_SHIM:-0}" == 1 ]]; then
+  python3 art-fieldwatch-phase1/lab/run_stock_fixture_oracle.py
+fi

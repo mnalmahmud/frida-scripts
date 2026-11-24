@@ -5,7 +5,7 @@ import android.content.pm.ApplicationInfo;
 import android.os.Bundle;
 import android.util.Log;
 
-/** Isolated synthetic workload for a source-built ART laboratory image. */
+/** Isolated synthetic workload for the stock ART leaf-method oracle. */
 public final class NoTemplateLabActivity extends Activity {
   @Override public void onCreate(Bundle state) {
     super.onCreate(state);

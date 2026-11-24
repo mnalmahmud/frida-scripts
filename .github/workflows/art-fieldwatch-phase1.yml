@@ -27,8 +27,8 @@ jobs:
       - run: python3 art-fieldwatch-phase1/ci/dex_field_sites.py --self-test
       - run: python3 art-fieldwatch-phase1/ci/resolve_field_events.py --self-test
       - run: python3 art-fieldwatch-phase1/ci/fixture_log.py
-      - run: python3 art-fieldwatch-phase1/lab/install_fixture_backend.py --self-test
-      - run: python3 art-fieldwatch-phase1/lab/verify_fixture_backend.py --self-test
+      - run: node --check art-fieldwatch-phase1/lab/stock_fixture_oracle.js
+      - run: python3 art-fieldwatch-phase1/lab/run_stock_fixture_oracle.py --self-test
       - run: bash -n art-fieldwatch-phase1/ci/run-emulator-smoke.sh
       - run: bash -n art-fieldwatch-phase1/ci/dex-inventory.sh
       - run: bash -n art-fieldwatch-phase1/ci/build-passive-shim.sh
@@ -124,6 +124,9 @@ jobs:
       - name: Record compiled fixture DEX for D8 comparison
         run: bash art-fieldwatch-phase1/ci/dex-inventory.sh
       - run: python3 -m pip install 'frida==17.27.1'
+      - name: Install official Frida CLI for the stock fixture oracle
+        if: matrix.api == 33 && matrix.variant == 'release'
+        run: python3 -m pip install 'frida==17.27.1' 'frida-tools==14.13.2'
       - uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: ${{ matrix.api }}
