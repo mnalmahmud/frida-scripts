@@ -24,7 +24,12 @@ const fields = [
   mk('writeB', 12, 'b', 2, 4, '0x67', 'write', 'static'),
   mk('readB', 13, 'b', 2, 6, '0x60', 'read', 'static')
 ];
-const dex = {dexId:0,sha256:'a'.repeat(64),fieldAccesses:fields};
+const codeFor = f => f.opcode.slice(2).toLowerCase() + '00' +
+  f.fieldIndex.toString(16).padStart(2,'0') + '00';
+const fieldMethods = fields.map(f => ({methodIndex:f.methodIndex,
+  methodClass:f.methodClass,methodName:f.methodName,
+  insnsSize:2,insnsHex:codeFor(f)}));
+const dex = {dexId:0,sha256:'a'.repeat(64),fieldAccesses:fields,fieldMethods};
 const catalog = {dexFiles:[dex]};
 assert.equal(select(catalog).count, 4);
 assert.equal(select(catalog, [
@@ -34,11 +39,31 @@ assert.equal(select(catalog,[
   {methodClass:cls,methodName:'writeA',fieldName:'a'},
   {methodClass:cls,methodName:'readA',fieldName:'a'}
 ]).count, 2);
-assert.equal(select(catalog).methods.get(10).sites.get('89:1').fieldName,'a');
+assert.equal(select(catalog).methods.get(10).sites.get(0).fieldName,'a');
+// Identical opcode/field ID twice inside one method is not ambiguous when the
+// live instruction pointer is bound to the verified method instruction bytes.
+const repeated = [
+  mk('repeat',20,'a',1,0,'0x59','write','instance'),
+  mk('repeat',20,'a',1,2,'0x52','read','instance'),
+  mk('repeat',20,'a',1,4,'0x59','write','instance'),
+  mk('repeat',20,'a',1,6,'0x52','read','instance')
+];
+const repeatedDex={...dex,
+  fieldAccesses:[...fields,...repeated],
+  fieldMethods:[...fieldMethods, {
+    methodIndex:20,methodClass:cls,methodName:'repeat',insnsSize:8,
+    insnsHex:repeated.map(codeFor).join('')
+  }]};
+const selected=select({dexFiles:[repeatedDex]});
+assert.equal(selected.count,8);
+assert.equal(selected.methods.get(20).sites.size,4);
+assert.equal(selected.methods.get(20).sites.get(4).dexPc,4);
 for (const invalid of [
   {dexFiles:[dex,dex]},
   {dexFiles:[{...dex,sha256:'invalid'}]},
   {dexFiles:[{...dex,fieldAccesses:[...fields,{...fields[0],dexPc:16}]}]},
+  {dexFiles:[{...dex,fieldMethods:fieldMethods.slice(1)}]},
+  {dexFiles:[{...dex,fieldMethods:[{...fieldMethods[0],insnsHex:'00000000'},...fieldMethods.slice(1)]}]},
   {dexFiles:[{...dex,fieldAccesses:[...fields,{...fields[0],methodIndex:11}]}]},
   {dexFiles:[{...dex,fieldAccesses:[{...fields[0],operation:'read'}]}]}
 ]) assert.throws(()=>select(invalid));
