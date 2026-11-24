@@ -57,8 +57,13 @@ fi
 if [[ "${ARTWATCH_SHADOW_SHIM:-0}" == 1 ]]; then
   # The app uses System.loadLibrary() from its packaged nativeLibraryDir;
   # never attempt executable mappings from /data/local/tmp in an app context.
-  unzip -l "$apk" | grep -q "lib/x86_64/libartwatch_shadow.so" ||
-    { echo "Native shim missing from APK" >&2; exit 1; }
+  # grep -q can close its pipe early, yielding unzip SIGPIPE under
+  # pipefail and falsely reporting a missing library. Read the full listing.
+  if ! unzip -Z -1 "$apk" | grep -Fx 'lib/x86_64/libartwatch_shadow.so' >/dev/null; then
+    echo "Native shim missing from APK" >&2
+    unzip -Z -1 "$apk" | grep 'libartwatch_' || true
+    exit 1
+  fi
 fi
 # Pull ART ELF files for offline symbol inspection; never scan their full
 # symbol tables inside the injected application.
