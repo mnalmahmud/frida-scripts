@@ -730,3 +730,27 @@ It does not authenticate the class loader for the observed ArtMethod,
 instrument quickened field opcodes, or extend coverage beyond the explicitly
 verified API33 x86_64 nterp build. The live full-method byte comparison is a
 correctness gate, not a generic decompilation/resolution mechanism.
+
+## Exact float field payloads on the int-family nterp handlers (2026-11-24)
+
+On the pinned API33 x86_64 ART build, ordinary `iget/iput/sget/sput`
+opcodes access both DEX `I` (signed 32-bit integer) and `F` (IEEE754
+32-bit float) field descriptors. The Frida nterp backend now distinguishes
+the descriptor from verified packaged DEX metadata, sampling float vregs
+as `readU32()` **raw IEEE754 bits**. It labels the value representation
+`raw-u32-ieee754`; it does not convert floats through JavaScript Number,
+which would lose exact NaN payload provenance. Integer events retain their
+signed 32-bit representation.
+
+The non-debuggable test workload adds separate instance/static float
+read and write methods, tests negative zero, a NaN with payload bits,
+subnormal 1 and negative infinity, and checks the observed 32-bit
+payload on each side of all four field operations. The oracle now requires
+2,048 selected field events per run, 2,050 attempted field matches
+including two unsuccessful null instance accesses, and zero ambiguous
+runtime DEX sites.
+
+This is deliberately **not** an implementation of `iget-wide`/`sget-wide`
+(`J`/`D`), object references, narrower primitive opcodes, quickened
+field operations, native JNI field writes, switch interpreter or compiled
+field instructions. Those need separate opcode and data layout handling.

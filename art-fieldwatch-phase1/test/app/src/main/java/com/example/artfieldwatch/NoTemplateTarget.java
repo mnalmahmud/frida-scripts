@@ -4,6 +4,7 @@ package com.example.artfieldwatch;
 public final class NoTemplateTarget {
   private int value;
   private int other;
+  private float floating;
 
   public static void writeInstance(NoTemplateTarget receiver, int x) {
     receiver.value = x;
@@ -11,6 +12,14 @@ public final class NoTemplateTarget {
 
   public static int readInstance(NoTemplateTarget receiver) {
     return receiver.value;
+  }
+
+  public static void writeInstanceFloat(NoTemplateTarget receiver, float value) {
+    receiver.floating = value;
+  }
+
+  public static float readInstanceFloat(NoTemplateTarget receiver) {
+    return receiver.floating;
   }
 
   // Non-leaf DEX method: 2 field writes and 2 reads with intervening
@@ -54,6 +63,14 @@ public final class NoTemplateTarget {
         throw new AssertionError("No-template non-leaf mismatch at " + i);
       if (repeatedStep(receiver, instance) != 2 * instance + 2)
         throw new AssertionError("Repeated DEX field site mismatch at " + i);
+      // Exact raw IEEE754 payloads (including -0 and a noncanonical NaN).
+      int floatBits = (i & 1) == 0 ? 0x80000000 : 0x7fc01234;
+      int staticFloatBits = (i & 1) == 0 ? 0x00000001 : 0xff800000;
+      writeInstanceFloat(receiver, Float.intBitsToFloat(floatBits));
+      NoTemplateStaticState.writeStaticFloat(Float.intBitsToFloat(staticFloatBits));
+      if (Float.floatToRawIntBits(readInstanceFloat(receiver)) != floatBits ||
+          Float.floatToRawIntBits(NoTemplateStaticState.readStaticFloat()) != staticFloatBits)
+        throw new AssertionError("Raw float field payload mismatch at " + i);
       checksum += observedInstance + observedStatic;
     }
     int failed = 0;
@@ -71,6 +88,9 @@ public final class NoTemplateTarget {
 /** A second declaring class, independent of the instance field. */
 final class NoTemplateStaticState {
   private static int shared;
+  private static float floating;
   static void writeStatic(int x) { shared = x; }
   static int readStatic() { return shared; }
+  static void writeStaticFloat(float value) { floating = value; }
+  static float readStaticFloat() { return floating; }
 }

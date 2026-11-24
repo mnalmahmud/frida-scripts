@@ -13,7 +13,7 @@ const profile = globalThis.__artwatchNterpProfile;
 const catalog = globalThis.__artwatchNterpCatalog;
 const selectors = globalThis.__artwatchNterpSelectors;
 const threadFilter = globalThis.__artwatchNterpThreadFilter;
-const MAX_RECORDS = 2048;
+const MAX_RECORDS = 4096;
 const active = new Map();
 const records = [];
 const diagnostics = [];
@@ -116,7 +116,7 @@ function selectFieldSites(data, selectors) {
   for (const field of dex.fieldAccesses) {
     const opcode = Number.parseInt(field.opcode, 16);
     if (!fieldOps.has(opcode) || field.valueKind !== 'int' ||
-        field.fieldType !== 'I') continue;
+        !['I','F'].includes(field.fieldType)) continue;
     const identity = [field.methodClass, field.methodName, field.fieldName].join('\0');
     if (wanted !== null && !wanted.has(identity)) continue;
     if (!Number.isInteger(field.methodIndex) || field.methodIndex < 0 ||
@@ -159,6 +159,7 @@ function selectFieldSites(data, selectors) {
     method.sites.set(field.dexPc,{
       name:field.methodName, methodClass:field.methodClass,
       declaringClass:field.declaringClass,fieldName:field.fieldName,
+      fieldType:field.fieldType,
       opcode,kind,fieldId:field.fieldIndex,methodIndex:field.methodIndex,
       dexPc:field.dexPc,dexId:dex.dexId,dexSha256:dex.sha256,
       sourceFile:field.sourceFile ?? null,sourceLine:field.sourceLine ?? null
@@ -303,7 +304,9 @@ function install() {
         (context.rbx.toUInt32()&255)===high) {
       const vreg=opcode>=0x60 ? high : high&15;
       sampled={...target, vreg,
-        preValue:target.kind===2 ? fp.add(vreg*4).readS32() : null,
+        preValue:target.kind===2 ?
+          (target.fieldType==='F' ? fp.add(vreg*4).readU32() :
+            fp.add(vreg*4).readS32()) : null,
         pc:pc.toString()};
       fieldHits++;
     }
@@ -326,13 +329,15 @@ function install() {
     if (!p.sampled) return;
     const f=p.sampled;
     const value=f.kind===1
-      ? context.r13.add(f.vreg*4).readS32() : f.preValue;
+      ? (f.fieldType==='F' ? context.r13.add(f.vreg*4).readU32() :
+          context.r13.add(f.vreg*4).readS32()) : f.preValue;
     if (records.length>=MAX_RECORDS) {dropped++;return;}
     if (records.length < 8) send({type:'artwatch-nterp-record-sample',
       number:records.length+1, method:f.name, value});
     records.push({seq:records.length+1,method:f.name,
       methodClass:f.methodClass,declaringClass:f.declaringClass,
-      fieldName:f.fieldName,fieldType:'I',
+      fieldName:f.fieldName,fieldType:f.fieldType,
+      valueRepresentation:f.fieldType==='F'?'raw-u32-ieee754':'signed-int32',
       dexId:f.dexId,dexSha256:f.dexSha256,
       methodIndex:f.methodIndex,fieldIndex:f.fieldId,dexPc:f.dexPc,
       dexPcSource:'live instruction base verified against packaged DEX bytes',

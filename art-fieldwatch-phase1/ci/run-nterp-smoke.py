@@ -20,6 +20,10 @@ ACTIVITY = PKG + "/.NoTemplateNterpActivity"
 ORDER = ("writeInstance", "writeStatic", "readInstance", "readStatic")
 OPCODE = {"writeInstance": 0x59, "readInstance": 0x52,
           "writeStatic": 0x67, "readStatic": 0x60}
+FLOAT_ORDER = ("writeInstanceFloat", "writeStaticFloat",
+               "readInstanceFloat", "readStaticFloat")
+FLOAT_OPCODE = {"writeInstanceFloat": 0x59, "readInstanceFloat": 0x52,
+                "writeStaticFloat": 0x67, "readStaticFloat": 0x60}
 
 
 def verify(catalog, result, sequence_stride=4):
@@ -136,11 +140,32 @@ def verify_nonleaf(catalog, result):
             len({f["fieldIndex"] for f in repeated}) != 1 or
             len({f["methodIndex"] for f in repeated}) != 1):
         raise AssertionError("Repeated DEX site identity not preserved")
+    float_sites = {}
+    for name in FLOAT_ORDER:
+        site = [f for f in dex["fieldAccesses"]
+                if f.get("methodName") == name and f.get("fieldType") == "F"]
+        if len(site) != 1 or int(site[0]["opcode"], 16) != FLOAT_OPCODE[name]:
+            raise AssertionError(f"Missing exact float DEX site: {name}")
+        float_sites[name] = site[0]
     events = result["events"]
-    if len(events) != 1536:
-        raise AssertionError(f"Expected 1536 opcode events, got {len(events)}")
+    if len(events) != 2048:
+        raise AssertionError(f"Expected 2048 opcode events, got {len(events)}")
+    live_methods = {}
+    for event in events:
+        method = event.get("runtimeMethodAddress")
+        instruction = event.get("instructionAddress")
+        if not method or not instruction:
+            raise AssertionError("Missing ArtMethod or nterp instruction pointer")
+        base = int(instruction, 16) - 2 * event["dexPc"]
+        key = (event["dexSha256"], event["dexId"], event["methodIndex"])
+        current = (method, base)
+        previous = live_methods.setdefault(key, current)
+        if previous != current:
+            raise AssertionError(f"Runtime method/Dex PC binding changed: {key}")
+    if result.get("verifiedRuntimeMethods") != len(live_methods):
+        raise AssertionError("Runtime DEX method binding cache/count mismatch")
     for i in range(128):
-        part = events[12*i:12*i+12]
+        part = events[16*i:16*i+16]
         if [e["method"] for e in part[:4]] != list(ORDER):
             raise AssertionError("Leaf order changed in non-leaf experiment")
         for j, (site, (field_name, operation, opcode)) in enumerate(
@@ -148,7 +173,7 @@ def verify_nonleaf(catalog, result):
             e = part[4+j]
             expected = 7 + 3*i if field_name == "value" else 8 + 3*i
             fields = {
-                "seq": 12*i+5+j, "method": "complexStep",
+                "seq": 16*i+5+j, "method": "complexStep",
                 "methodClass": site["methodClass"],
                 "declaringClass": site["declaringClass"],
                 "fieldName": field_name, "fieldType": "I",
@@ -167,7 +192,7 @@ def verify_nonleaf(catalog, result):
             e = part[8+j]
             expected = 7 + 3*i + (2 if j >= 2 else 0)
             fields = {
-                "seq": 12*i+9+j, "method": "repeatedStep",
+                "seq": 16*i+9+j, "method": "repeatedStep",
                 "methodClass": site["methodClass"],
                 "declaringClass": site["declaringClass"],
                 "fieldName": "value", "fieldType": "I",
@@ -182,9 +207,34 @@ def verify_nonleaf(catalog, result):
                     raise AssertionError(f"Repeated field event iteration={i} site={j} {k}: {e.get(k)!r} != {v!r}")
             if e.get("dexPcSource") != "live instruction base verified against packaged DEX bytes":
                 raise AssertionError("Repeated field DEX PC was inferred")
+        for j, name in enumerate(FLOAT_ORDER):
+            site = float_sites[name]
+            e = part[12+j]
+            bits = (0x80000000 if i % 2 == 0 else 0x7fc01234) if (
+                "Instance" in name) else (
+                0x00000001 if i % 2 == 0 else 0xff800000)
+            fields = {
+                "seq": 16*i+13+j, "method": name,
+                "methodClass": site["methodClass"],
+                "declaringClass": site["declaringClass"],
+                "fieldName": "floating", "fieldType": "F",
+                "valueRepresentation": "raw-u32-ieee754",
+                "dexId": dex["dexId"], "dexSha256": dex["sha256"],
+                "methodIndex": site["methodIndex"],
+                "fieldIndex": site["fieldIndex"], "dexPc": site["dexPc"],
+                "opcode": FLOAT_OPCODE[name],
+                "kind": 2 if name.startswith("write") else 1,
+                "value": bits
+            }
+            for k, v in fields.items():
+                if e.get(k) != v:
+                    raise AssertionError(f"Float event iteration={i} site={j} {k}: {e.get(k)!r} != {v!r}")
+            if e.get("dexPcSource") != "live instruction base verified against packaged DEX bytes":
+                raise AssertionError("Float DEX PC was inferred")
     if result.get("unverifiedSites"):
         raise AssertionError("Observed fields without verified live DEX site identity")
-    print("PASS: 1024 non-leaf and repeated-site DEX field accesses, verified live PCs")
+    print("PASS: 1536 non-leaf, repeated-site and exact raw-float accesses")
+
 
 
 def main():
@@ -204,6 +254,12 @@ def main():
                     for name in ("value","other"))
     selected.append({"methodClass":"Lcom/example/artfieldwatch/NoTemplateTarget;",
                      "methodName":"repeatedStep","fieldName":"value"})
+    selected.extend({
+        "methodClass": ("Lcom/example/artfieldwatch/NoTemplateTarget;"
+                        if "Instance" in name else
+                        "Lcom/example/artfieldwatch/NoTemplateStaticState;"),
+        "methodName": name, "fieldName": "floating"
+    } for name in FLOAT_ORDER)
     source = ("globalThis.__artwatchNterpThreadFilter=" +
               json.dumps("NterpFieldProbe") + ";\n" +
               "globalThis.__artwatchNterpSelectors=" + json.dumps(selected) + ";\n" +
@@ -312,13 +368,13 @@ def main():
         (out / "nterp-runtime-events.json").write_text(json.dumps(snapshot, indent=2))
         (out / "nterp-probe-messages.json").write_text(json.dumps(events, indent=2))
         leaf_only = {**snapshot, "events": [
-            e for e in snapshot["events"] if e.get("method") != "complexStep"]}
-        verify(catalog, leaf_only, sequence_stride=12)
+            e for e in snapshot["events"] if e.get("method") in ORDER]}
+        verify(catalog, leaf_only, sequence_stride=16)
         verify_nonleaf(catalog, snapshot)
-        if snapshot.get("fieldHits") != 1538 or (
-                snapshot.get("completedHits") != 1536):
-            raise AssertionError("Expected 1538 field handler matches, "
-                                 "1536 completed field operations and "
+        if snapshot.get("fieldHits") != 2050 or (
+                snapshot.get("completedHits") != 2048):
+            raise AssertionError("Expected 2050 field handler matches, "
+                                 "2048 completed field operations and "
                                  "two failed null accesses")
     finally:
         if child.poll() is None:

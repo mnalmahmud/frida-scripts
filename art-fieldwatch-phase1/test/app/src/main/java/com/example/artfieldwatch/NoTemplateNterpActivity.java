@@ -27,6 +27,13 @@ public final class NoTemplateNterpActivity extends Activity {
       finish();
       return;
     }
+    // Preload Float helper code before arming interpreter field breakpoints.
+    if (Float.floatToRawIntBits(Float.intBitsToFloat(0x80000000)) != 0x80000000 ||
+        Float.floatToRawIntBits(NoTemplateStaticState.readStaticFloat()) != 0) {
+      Log.e("ARTWATCH_NTERP_LAB", "NTERP_LAB_FAILED float initialization");
+      finish();
+      return;
+    }
     // Frida attaches/validates ART before the second launch starts measurement.
     Log.i("ARTWATCH_NTERP_LAB", "NTERP_LAB_IDLE");
   }

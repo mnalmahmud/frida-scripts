@@ -54,6 +54,15 @@ const repeatedDex={...dex,
     methodIndex:20,methodClass:cls,methodName:'repeat',insnsSize:8,
     insnsHex:repeated.map(codeFor).join('')
   }]};
+const floatField={...fields[0],methodName:'writeFloat',methodIndex:14,
+  fieldName:'floating',fieldType:'F',fieldIndex:3};
+const floatDex={...dex,fieldAccesses:[...fields,floatField],
+  fieldMethods:[...fieldMethods,{
+    methodIndex:14,methodClass:cls,methodName:'writeFloat',
+    insnsSize:2,insnsHex:codeFor(floatField)
+  }]};
+assert.equal(select({dexFiles:[floatDex]}).count,5);
+assert.equal(select({dexFiles:[floatDex]}).methods.get(14).sites.get(0).fieldType,'F');
 const selected=select({dexFiles:[repeatedDex]});
 assert.equal(selected.count,8);
 assert.equal(selected.methods.get(20).sites.size,4);
