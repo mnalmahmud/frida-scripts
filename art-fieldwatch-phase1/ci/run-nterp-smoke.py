@@ -15,8 +15,8 @@ from pathlib import Path
 
 BASE = Path(__file__).resolve().parents[1]
 PKG = "com.example.artfieldwatch"
-LAB_PROCESS = PKG + ":fieldwatch_lab"
-ACTIVITY = PKG + "/.NoTemplateLabActivity"
+LAB_PROCESS = PKG + ":fieldwatch_nterp"
+ACTIVITY = PKG + "/.NoTemplateNterpActivity"
 ORDER = ("writeInstance", "writeStatic", "readInstance", "readStatic")
 OPCODE = {"writeInstance": 0x59, "readInstance": 0x52,
           "writeStatic": 0x67, "readStatic": 0x60}
@@ -141,10 +141,10 @@ def main():
         while time.monotonic() < deadline:
             log = subprocess.check_output(
                 ["adb", "logcat", "-d", "--pid=" + str(results["pid"]),
-                 "-s", "ARTWATCH_LAB:I", "*:S"], text=True)
-            if "NO_TEMPLATE_LAB_FAILED" in log:
+                 "-s", "ARTWATCH_NTERP_LAB:I", "*:S"], text=True)
+            if "NTERP_LAB_FAILED" in log:
                 raise AssertionError("Synthetic field workload failed")
-            if "NO_TEMPLATE_LAB_DONE checksum=-16768 nullChecks=2" in log:
+            if "NTERP_LAB_DONE checksum=-16768 nullChecks=2" in log:
                 done = True
                 break
             time.sleep(0.3)

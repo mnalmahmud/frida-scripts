@@ -1,6 +1,7 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
  <application android:label="ART Fieldwatch CI" android:allowBackup="false">
-  <activity android:name=".NoTemplateLabActivity" android:exported="true" android:process=":fieldwatch_lab"/>
+  <activity android:name=".NoTemplateLabActivity" android:exported="true"/>
+  <activity android:name=".NoTemplateNterpActivity" android:exported="true" android:process=":fieldwatch_nterp"/>
   <activity android:name=".MainActivity" android:exported="true">
    <intent-filter>
     <action android:name="android.intent.action.MAIN"/>

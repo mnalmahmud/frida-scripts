@@ -618,7 +618,7 @@ The host extracts actual ELF symbol offsets for
 `artNterpAsmInstructionStart/End` from the pulled `libart.so`, checking
 an exact 32768-byte opcode table and the pinned GNU Build ID. The agent
 independently verifies the **live mapped** ELF Build ID before attaching.
-The separate non-debuggable `fieldwatch_lab` process exercises four DEX
+The separate non-debuggable `fieldwatch_nterp` process exercises four DEX
 methods with no authored event-sink calls. CI checks 512 exact-value
 nterp events with runtime instruction addresses and static DEX identities.
 **This is not a claim about JIT, AOT, switch-interpreter, other APIs or ISAs.**
