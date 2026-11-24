@@ -1,7 +1,10 @@
 # ART Fieldwatch Phase 1 — JIT and HGraph research
 
-**Read-only diagnostic:** field interception, graph mutation, DEX rewriting,
-deoptimization and native compiled-code patching are NOT implemented.
+**Research prototype:** early P1 observations are read-only; later P3 experiments
+include opt-in compiler mutation restricted to the repository's own synthetic APK.
+General field monitoring, template-independent injection, and broad Android/ABI
+coverage are not established. The historical sections below describe their
+respective milestones.
 
 ## Verified compiler interface
 
@@ -553,3 +556,22 @@ accesses; no reference or volatile field support is claimed.
 
 Android's supported JNI loading/symbol contract:
 https://developer.android.com/ndk/guides/jni-tips
+
+## Verified baseline — 2026-11-24
+
+[CI run 45287652043](https://github.com/mnalmahmud/frida-scripts/actions/runs/45287652043)
+for commit `4a5d9abb` passed static checks, API33 x86_64 debug and
+non-debuggable release, and API34 x86_64 debug. ARM64 was skipped.
+Both API33 jobs reported 256 archived P3 fixture events with exact values,
+ordering and DEX metadata, and independently passed the 256-event P2 oracle.
+The two P3 cloned nodes reached location assignment and code emission.
+Both jobs also passed 14 explicit primitive JNI transport records.
+These are separate kinds of evidence; the primitive transport check is not
+proof of compiler injection for all primitive types. API34 establishes only
+the JIT smoke test, not P3 coverage. The raw-field canary remains a negative
+control and general template-independent monitoring is not verified.
+
+The host now additionally validates complete, unique and ordered fixture
+completion markers and ties null-access assertions to their own workload.
+Static self-tests exercise missing, duplicated, malformed and reordered
+markers. This changes validation only, not field instrumentation.

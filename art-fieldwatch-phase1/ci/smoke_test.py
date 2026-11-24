@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 import frida
 from resolve_field_events import resolve
+from fixture_log import validate as validate_fixture_log
 
 BASE = Path(__file__).resolve().parents[1]
 LOG_DIR = Path(os.environ.get('ARTWATCH_LOG_DIR','/tmp/artwatch-logs'))
@@ -96,7 +97,7 @@ def main():
     finally:
         try: session.detach()
         except frida.InvalidOperationError: pass
-    logs = subprocess.run(['adb','logcat','-d','-s','ARTWATCH_CI:I','*:S'],
+    logs = subprocess.run(['adb','logcat','-d','-v','threadtime','-s','ARTWATCH_CI:I','*:S'],
       capture_output=True,text=True,check=False)
     (LOG_DIR/'logcat.txt').write_text(logs.stdout+logs.stderr)
     (LOG_DIR/'frida-messages.json').write_text(json.dumps(messages,indent=2))
@@ -105,6 +106,9 @@ def main():
     if 'arch=' not in text: raise AssertionError('No Frida process header')
     if errors: raise AssertionError('Frida errors: '+'; '.join(errors))
     variant = os.environ.get('ARTWATCH_BUILD_VARIANT','debug')
+    validate_fixture_log(logs.stdout, variant,
+                         os.environ.get('ARTWATCH_SHADOW_SHIM') == '1',
+                         os.environ.get('ARTWATCH_P3_INJECT') == '1')
     expected_debug = 'true' if variant == 'debug' else 'false'
     if f'APP_DEBUGGABLE={expected_debug}' not in logs.stdout:
         raise AssertionError(f'Unexpected app debuggable flag for {variant} build')
