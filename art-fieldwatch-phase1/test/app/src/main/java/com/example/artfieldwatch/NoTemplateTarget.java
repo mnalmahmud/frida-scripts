@@ -27,6 +27,16 @@ public final class NoTemplateTarget {
     return a + b;
   }
 
+  // Two writes and two reads of the *same* field inside one method.
+  // The runtime must report two separate DEX PCs for each opcode/field ID.
+  public static int repeatedStep(NoTemplateTarget receiver, int value) {
+    receiver.value = value;
+    int first = receiver.value;
+    receiver.value = value + 2;
+    int second = receiver.value;
+    return first + second;
+  }
+
   public static int exercise() {
     NoTemplateTarget receiver = new NoTemplateTarget();
     int checksum = 0;
@@ -42,6 +52,8 @@ public final class NoTemplateTarget {
       }
       if (complexStep(receiver, instance) != 2 * instance + 1)
         throw new AssertionError("No-template non-leaf mismatch at " + i);
+      if (repeatedStep(receiver, instance) != 2 * instance + 2)
+        throw new AssertionError("Repeated DEX field site mismatch at " + i);
       checksum += observedInstance + observedStatic;
     }
     int failed = 0;
