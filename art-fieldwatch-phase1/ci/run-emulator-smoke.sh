@@ -73,3 +73,9 @@ fi
 if [[ "$variant" == release && "${ARTWATCH_SHADOW_SHIM:-0}" == 1 ]]; then
   python3 art-fieldwatch-phase1/lab/run_stock_fixture_oracle.py
 fi
+
+# Experimental *instruction-level* nterp backend on unmodified ART.
+# A separate process avoids previous JIT warmup / method-hook interference.
+if [[ "$variant" == release && "${ARTWATCH_SHADOW_SHIM:-0}" == 1 ]]; then
+  python3 art-fieldwatch-phase1/ci/run-nterp-smoke.py
+fi

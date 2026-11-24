@@ -601,3 +601,27 @@ records and two null exceptions. No ART source build is required.
 This is a reference measurement only. It is not a template-independent
 field-opcode interception backend, does not observe eliminated operations
 or inlined callers, and does not establish arbitrary field coverage.
+
+## Stock-ART nterp instruction interceptor (research, API33 x86_64)
+
+`nterp-field-probe.js` attaches **to actual 128-byte nterp opcode handler
+entries** for instance/static integer reads and writes plus allowed successor
+opcodes. Unlike the Java leaf-call oracle, the callback is reached only when
+ART dispatches a DEX field instruction through nterp. The handler's own
+`r12` DEX instruction pointer and `r13` virtual-register frame are read.
+A successful field operation is recognized when nterp dispatches its immediate
+successor; the read value is taken from the destination virtual register,
+and the write value comes from the input register, not from a second field
+read. Failed/null operations do not reach the immediate successor.
+
+The host extracts actual ELF symbol offsets for
+`artNterpAsmInstructionStart/End` from the pulled `libart.so`, checking
+an exact 32768-byte opcode table and the pinned GNU Build ID. The agent
+independently verifies the **live mapped** ELF Build ID before attaching.
+The separate non-debuggable `fieldwatch_lab` process exercises four DEX
+methods with no authored event-sink calls. CI checks 512 exact-value
+nterp events with runtime instruction addresses and static DEX identities.
+**This is not a claim about JIT, AOT, switch-interpreter, other APIs or ISAs.**
+Field PCs are mapped from the verified fixture catalog rather than measured
+from the method code-item base. Source-backed assumptions remain gated to
+this precise ART build; unrelated binaries must fail closed.
