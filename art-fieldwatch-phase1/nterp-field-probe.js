@@ -23,6 +23,8 @@ let hardwareHits = 0;
 let fieldHits = 0;
 let completedHits = 0;
 let unverifiedSites = 0;
+// Read by the exported snapshot method; do not declare this inside install().
+const liveBases = new Map();
 let abandonedFieldAttempts = 0;
 let firstTrapDiagnostics = 0;
 let dropped = 0;
@@ -181,8 +183,6 @@ function install() {
   const methods = selected.methods;
   // ArtMethod address distinguishes loaded runtime methods; a DEX method index
   // alone does NOT distinguish the framework, secondary DEX, or class loaders.
-  const liveBases = new Map();
-
   function liveFieldSite(artMethod, instruction, method, opcode, fieldId) {
     const candidates = Array.from(method.sites.values()).filter(s =>
       s.opcode === opcode && s.fieldId === fieldId);
