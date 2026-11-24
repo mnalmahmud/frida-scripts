@@ -34,6 +34,9 @@ def validate(log, variant, native_fixture, injection):
             ("DIRECT_ABI_DONE", "DIRECT_ABI_DONE count=4 checksum=103"),
             ("PRIMITIVE_ABI_DONE", "PRIMITIVE_ABI_DONE count=14 checksum=61"),
         ])
+    if native_fixture and variant == "release":
+        expected.append(("NO_TEMPLATE_WORKLOAD_DONE",
+                         "NO_TEMPLATE_WORKLOAD_DONE checksum=-16768 nullChecks=2"))
     expected.append(("WARMUP_DONE", r"WARMUP_DONE checksum=-?\d+"))
     last = -1
     for prefix, pattern in expected:
@@ -54,7 +57,9 @@ def self_test():
         "P3_CANARY_DONE count=0 checksum=25280 nullCheck=true",
         "RUNTIME_EVENTS_DONE count=256 checksum=25280 nullCheck=true",
         "DIRECT_ABI_DONE count=4 checksum=103",
-        "PRIMITIVE_ABI_DONE count=14 checksum=61", "WARMUP_DONE checksum=123",
+        "PRIMITIVE_ABI_DONE count=14 checksum=61",
+        "NO_TEMPLATE_WORKLOAD_DONE checksum=-16768 nullChecks=2",
+        "WARMUP_DONE checksum=123",
     ]
 
     def log(rows):

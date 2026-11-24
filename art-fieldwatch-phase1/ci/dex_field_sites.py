@@ -143,6 +143,7 @@ class Dex:
                 "prototypeIndex":u16(self.data,pos+2)}
     def sites(self):
         out=[]
+        self.fixture_methods=[]
         for cls in range(self.classes_count):
             pos=self.classes_off+cls*32
             class_type=self.typ(u32(self.data,pos))
@@ -176,9 +177,14 @@ class Dex:
                     pc=0
                     method=self.method(method_idx)
                     if method["methodClass"]!=class_type: raise ValueError("class method mismatch")
+                    fixture_leaf=(method["methodClass"], method["methodName"]) in FIXTURE_LEAVES
+                    leaf_ops=[]
+                    first_site=len(out)
                     while pc<insns:
                         op=u16(self.data,base+2*pc)&255
                         width=insn_width(self.data,base,pc,insns)
+                        if fixture_leaf:
+                            leaf_ops.append(f"0x{op:02x}")
                         if op in FIELD_OPS:
                             field_idx=u16(self.data,base+2*(pc+1))
                             line=None
@@ -190,7 +196,55 @@ class Dex:
                                         "sourceFile":source,"sourceLine":line,
                                         "opcode":f"0x{op:02x}"})
                         pc+=width
+                    if fixture_leaf:
+                        self.fixture_methods.append({**method, "opcodes":leaf_ops,
+                                                     "fields":out[first_site:]})
         return out
+
+# A test-only audit of four explicit leaf methods in this repository's APK.
+# No instrumentation or event production is performed here.
+FIXTURE_PACKAGE = "Lcom/example/artfieldwatch/"
+FIXTURE_LEAVES = {
+    (FIXTURE_PACKAGE + "NoTemplateTarget;", "writeInstance"): ("0x59", "value", "instance", "write", "0x0e"),
+    (FIXTURE_PACKAGE + "NoTemplateTarget;", "readInstance"): ("0x52", "value", "instance", "read", "0x0f"),
+    (FIXTURE_PACKAGE + "NoTemplateStaticState;", "writeStatic"): ("0x67", "shared", "static", "write", "0x0e"),
+    (FIXTURE_PACKAGE + "NoTemplateStaticState;", "readStatic"): ("0x60", "shared", "static", "read", "0x0f"),
+}
+
+
+def verify_fixture_methods(methods):
+    seen = set()
+    field_ids = {}
+    for m in methods:
+        key = (m["methodClass"], m["methodName"])
+        if key not in FIXTURE_LEAVES or key in seen:
+            raise AssertionError(f"Unexpected or duplicate fixture method: {key}")
+        seen.add(key)
+        opcode, name, access, operation, ret = FIXTURE_LEAVES[key]
+        # No calls, branches, allocations, or other instructions are allowed.
+        # Move instructions are accepted to accommodate D8 register allocation.
+        ops = m["opcodes"]
+        if (ops.count(opcode) != 1 or not ops or ops[-1] != ret or
+                any(o not in (opcode, ret, "0x01", "0x02", "0x03", "0x00") for o in ops)
+                or ops.count(ret) != 1):
+            raise AssertionError(f"Not a pure field leaf method: {key}: {ops}")
+        fields = m["fields"]
+        if len(fields) != 1:
+            raise AssertionError(f"Expected one field operation: {key}")
+        f = fields[0]
+        if (f["declaringClass"], f["fieldName"], f["fieldType"],
+                f["access"], f["operation"]) != (key[0], name, "I", access, operation):
+            raise AssertionError(f"Unexpected field identity: {f}")
+        identity = (m["dexId"], f["fieldIndex"])
+        previous = field_ids.setdefault((key[0], name), identity)
+        if previous != identity:
+            raise AssertionError("Fixture read/write IDs disagree")
+    if seen != set(FIXTURE_LEAVES):
+        raise AssertionError(f"Missing fixture leaf methods: {set(FIXTURE_LEAVES) - seen}")
+    if len(set(field_ids.values())) != 2:
+        raise AssertionError("Fixture does not have two independent fields")
+    return len(seen)
+
 
 def inventory(apk):
     with zipfile.ZipFile(apk) as z:
@@ -198,14 +252,16 @@ def inventory(apk):
                      (n.startswith("classes") and n.endswith(".dex") and n[7:-4].isdigit()))
         if not names: raise ValueError("APK has no DEX")
         dex_files=[]
+        fixture_methods=[]
         for dex_id,name in enumerate(names):
             dex=Dex(z.read(name),name)
             sites=dex.sites()
+            fixture_methods.extend({**m,"dexId":dex_id} for m in dex.fixture_methods)
             dex_files.append({"dexId":dex_id,"name":name,"sha256":dex.shasum,
                               "fieldAccesses":sites,"count":len(sites)})
         return {"schemaVersion":1,"apk":Path(apk).name,
                 "totalFieldSites":sum(d["count"] for d in dex_files),
-                "dexFiles":dex_files}
+                "dexFiles":dex_files,"fixtureMethods":fixture_methods}
 
 def self_test():
     assert FIELD_OPS[0x52]=={"access":"instance","operation":"read","valueKind":"int"}
@@ -218,6 +274,20 @@ def self_test():
     try: insn_width(b"\x52\x00",0,0,1)
     except ValueError: pass
     else: raise AssertionError("truncated field instruction accepted")
+    methods = []
+    for i, (key, spec) in enumerate(FIXTURE_LEAVES.items()):
+        opcode, name, access, operation, ret = spec
+        methods.append({"methodClass":key[0],"methodName":key[1],
+                        "dexId":0,"opcodes":[opcode,ret],
+                        "fields":[{"declaringClass":key[0],"fieldName":name,
+                                   "fieldType":"I","fieldIndex":i//2,
+                                   "access":access,"operation":operation}]})
+    assert verify_fixture_methods(methods)==4
+    for bad in (methods[:-1], methods+[methods[0]],
+                [{**methods[0],"opcodes":["0x71",*methods[0]["opcodes"]]},*methods[1:]]):
+        try: verify_fixture_methods(bad)
+        except AssertionError: pass
+        else: raise AssertionError("Invalid no-template fixture accepted")
     print("dex_field_sites self-test OK")
 
 if __name__=="__main__":
@@ -225,12 +295,16 @@ if __name__=="__main__":
     parser.add_argument("apk",nargs="?")
     parser.add_argument("--self-test",action="store_true")
     parser.add_argument("--output",type=Path)
+    parser.add_argument("--verify-no-template-fixture",action="store_true")
     args=parser.parse_args()
     if args.self_test:
         self_test()
     else:
         if not args.apk: parser.error("APK argument required")
         result=inventory(args.apk)
+        if args.verify_no_template_fixture:
+            count=verify_fixture_methods(result["fixtureMethods"])
+            print(f"Verified {count} pure fixture leaf methods in packaged DEX",file=__import__("sys").stderr)
         payload=json.dumps(result,indent=2,sort_keys=True)
         if args.output: args.output.write_text(payload+"\n")
         else: print(payload)

@@ -575,3 +575,15 @@ The host now additionally validates complete, unique and ordered fixture
 completion markers and ties null-access assertions to their own workload.
 Static self-tests exercise missing, duplicated, malformed and reordered
 markers. This changes validation only, not field instrumentation.
+
+## Independent no-template release workload
+
+The synthetic APK now includes `NoTemplateTarget` and `NoTemplateStaticState`,
+with separate instance/static read and write methods and no event sink calls.
+CI checks all four leaf methods against the actual packaged DEX: exactly one
+matching field opcode and a return, with only register moves/nops additionally
+allowed. The read/write IDs must agree for each of two independent fields.
+The release workload checks 128 iterations, signed integer results, checksum
+-16768, and separate null-read/null-write exceptions. This is a workload and
+DEX-shape oracle only; it does not record runtime events and is not evidence
+of a template-independent instrumentation backend.
