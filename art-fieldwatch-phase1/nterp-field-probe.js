@@ -11,7 +11,8 @@
 // The result is sampled at that next opcode, never by re-reading the field.
 const profile = globalThis.__artwatchNterpProfile;
 const catalog = globalThis.__artwatchNterpCatalog;
-const MAX_RECORDS = 512;
+const selectors = globalThis.__artwatchNterpSelectors;
+const MAX_RECORDS = 2048;
 const active = new Map();
 const records = [];
 const diagnostics = [];
@@ -69,42 +70,90 @@ function readLiveBuildId(module) {
   }
   throw new Error('Loaded libart GNU Build ID not found');
 }
-function selectFixtures(data) {
-  const picked = new Map();
-  if (!data || !Array.isArray(data.fixtureMethods))
-    throw new Error('Missing packaged DEX fixture catalog');
-  const expected = new Map([
-    ['writeInstance', [0x59, 2]],
-    ['readInstance', [0x52, 1]],
-    ['writeStatic', [0x67, 2]],
-    ['readStatic', [0x60, 1]]
-  ]);
-  for (const m of data.fixtureMethods) {
-    const pair = expected.get(m.methodName);
-    if (!pair || !m.methodClass.startsWith('Lcom/example/artfieldwatch/') ||
-        m.dexId !== 0 || !Array.isArray(m.fields) || m.fields.length !== 1 ||
-        !Number.isInteger(m.methodIndex) || !Number.isInteger(m.fields[0].fieldIndex))
-      throw new Error('Invalid fixture method in packaged DEX');
-    const f = m.fields[0];
-    if (f.opcode !== '0x' + pair[0].toString(16) ||
-        (pair[1] === 1 ? f.operation !== 'read' : f.operation !== 'write'))
-      throw new Error('Fixture opcode mismatch');
-    if (picked.has(m.methodIndex)) throw new Error('Duplicate DEX method ID');
-    picked.set(m.methodIndex, {
-      name: m.methodName, opcode: pair[0], kind: pair[1],
-      dexPc: f.dexPc, fieldId: f.fieldIndex,
-      fieldName: f.fieldName
-    });
+function selectFieldSites(data, selectors) {
+  if (!data || !Array.isArray(data.dexFiles) ||
+      data.dexFiles.length !== 1 ||
+      !Array.isArray(data.dexFiles[0].fieldAccesses)) {
+    throw new Error('This version requires a single verified DEX file');
   }
-  if (picked.size !== 4) throw new Error('Expected four fixture field methods');
-  return picked;
+  // A plain DEX method index is NOT globally unique. Cross-DEX and
+  // class-loader identity require an additional runtime discriminator.
+  const dex = data.dexFiles[0];
+  if (dex.dexId !== 0 || typeof dex.sha256 !== 'string' ||
+      !/^[0-9a-f]{64}$/i.test(dex.sha256))
+    throw new Error('Invalid DEX catalog identity');
+  const validSelectors = selectors === null || selectors === undefined ? null : selectors;
+  if (validSelectors !== null &&
+      (!Array.isArray(validSelectors) || validSelectors.length === 0 ||
+       validSelectors.some(s => !s || typeof s !== 'object' ||
+         typeof s.methodClass !== 'string' ||
+         typeof s.methodName !== 'string' ||
+         typeof s.fieldName !== 'string'))) {
+    throw new Error('Expected an array of exact methodClass/methodName/fieldName selectors');
+  }
+  const wanted = validSelectors === null ? null :
+    new Set(validSelectors.map(s =>
+      [s.methodClass, s.methodName, s.fieldName].join('\0')));
+  const matched = new Set();
+  const methods = new Map();
+  let count = 0;
+  for (const field of dex.fieldAccesses) {
+    const opcode = Number.parseInt(field.opcode, 16);
+    if (!fieldOps.has(opcode) || field.valueKind !== 'int' ||
+        field.fieldType !== 'I') continue;
+    const identity = [field.methodClass, field.methodName, field.fieldName].join('\0');
+    if (wanted !== null && !wanted.has(identity)) continue;
+    if (!Number.isInteger(field.methodIndex) || field.methodIndex < 0 ||
+        !Number.isInteger(field.fieldIndex) || field.fieldIndex < 0 ||
+        !Number.isInteger(field.dexPc) || field.dexPc < 0 ||
+        typeof field.methodClass !== 'string' ||
+        typeof field.methodName !== 'string' ||
+        typeof field.declaringClass !== 'string') {
+      throw new Error('Invalid DEX field site metadata');
+    }
+    const kind = (opcode === 0x52 || opcode === 0x60) ? 1 : 2;
+    if (field.operation !== (kind === 1 ? 'read' : 'write') ||
+        field.access !== (opcode < 0x60 ? 'instance' : 'static'))
+      throw new Error('Field opcode semantics disagree with catalog');
+    if (wanted !== null) matched.add(identity);
+    let method = methods.get(field.methodIndex);
+    if (method === undefined) {
+      method = {methodClass:field.methodClass,
+        methodName:field.methodName,sites:new Map()};
+      methods.set(field.methodIndex,method);
+    } else if (method.methodClass !== field.methodClass ||
+               method.methodName !== field.methodName) {
+      throw new Error('DEX method ID collision');
+    }
+    // Repeated accesses to the same field and opcode in one method have
+    // different DEX PCs. We cannot assign them correctly until the live
+    // instruction PC is bound to the DEX code-item base: reject rather
+    // than fabricate the caller or DEX PC.
+    const key = opcode + ':' + field.fieldIndex;
+    if (method.sites.has(key))
+      throw new Error('Ambiguous repeated field site at DEX method '+field.methodIndex);
+    method.sites.set(key,{
+      name:field.methodName, methodClass:field.methodClass,
+      declaringClass:field.declaringClass,fieldName:field.fieldName,
+      opcode,kind,fieldId:field.fieldIndex,methodIndex:field.methodIndex,
+      dexPc:field.dexPc,dexId:dex.dexId,dexSha256:dex.sha256,
+      sourceFile:field.sourceFile ?? null,sourceLine:field.sourceLine ?? null
+    });
+    count++;
+  }
+  if (wanted !== null && matched.size !== wanted.size)
+    throw new Error('A requested field selector was not found in packaged DEX');
+  if (count === 0) throw new Error('No supported int DEX field sites selected');
+  return {methods, count};
 }
+
 function install() {
   if (!profile || profile.api !== 33 || profile.architecture !== 'x86_64' ||
       Process.arch !== 'x64' || Process.pointerSize !== 8 ||
       profile.handlerSize !== 128 || profile.opcodeCount !== 256)
     throw new Error('Unsupported ART / nterp ABI');
-  const methods = selectFixtures(catalog);
+  const selected = selectFieldSites(catalog,selectors);
+  const methods = selected.methods;
   const art = Process.findModuleByName('libart.so');
   if (!art) throw new Error('libart.so is not mapped');
   const buildId = readLiveBuildId(art);
@@ -166,16 +215,16 @@ function install() {
     const destination=base.add(successorOpcode*128);
     const id=bpIds.get(opcode);
     const methodIndex=method.add(8).readU32();
-    const target=methods.get(methodIndex);
+    const methodSites=methods.get(methodIndex);
     const high=pc.add(1).readU8(), fieldId=pc.add(2).readU16();
+    const target=methodSites && methodSites.sites.get(opcode + ':' + fieldId);
     let sampled=null;
     if (target && target.opcode===opcode && target.fieldId===fieldId &&
         (context.rbx.toUInt32()&255)===high &&
         successorOpcode===(target.kind===1 ? 0x0f : 0x0e)) {
       const vreg=opcode>=0x60 ? high : high&15;
-      sampled={name:target.name,kind:target.kind,opcode,
-        fieldId,methodIndex,dexPc:target.dexPc,
-        vreg,preValue:target.kind===2 ? fp.add(vreg*4).readS32() : null,
+      sampled={...target, vreg,
+        preValue:target.kind===2 ? fp.add(vreg*4).readS32() : null,
         pc:pc.toString()};
       fieldHits++;
     }
@@ -202,7 +251,12 @@ function install() {
     if (records.length < 8) send({type:'artwatch-nterp-record-sample',
       number:records.length+1, method:f.name, value});
     records.push({seq:records.length+1,method:f.name,
+      methodClass:f.methodClass,declaringClass:f.declaringClass,
+      fieldName:f.fieldName,fieldType:'I',
+      dexId:f.dexId,dexSha256:f.dexSha256,
       methodIndex:f.methodIndex,fieldIndex:f.fieldId,dexPc:f.dexPc,
+      dexPcSource:'single-candidate DEX site',
+      sourceFile:f.sourceFile,sourceLine:f.sourceLine,
       opcode:f.opcode,kind:f.kind,value,instructionAddress:f.pc,
       provenance:'nterp hardware breakpoint and succeeding opcode'});
   }
@@ -283,7 +337,8 @@ function install() {
 
   ready=true;
   send({type:'artwatch-nterp-init',ready:true,mode:'hardware-breakpoint',
-    buildId,candidateHandlers:ops.length,attachedHandlers:0,
+    buildId,candidateHandlers:ops.length,selectedFieldSites:selected.count,
+    attachedHandlers:0,
     moduleBase:art.base.toString(),handlerTable:base.toString()});
   return armThreads;
 }

@@ -37,7 +37,12 @@ def verify(catalog, result):
         m = methods[name]
         f = m["fields"][0]
         value = (7 + 3*iteration) if "Instance" in name else -11 - 5*iteration
+        dex = catalog.get("dexFiles", [{}])[0]
         expected = {"seq": n + 1, "method": name,
+                    "methodClass": m["methodClass"],
+                    "declaringClass": f["declaringClass"],
+                    "fieldName": f["fieldName"], "fieldType": "I",
+                    "dexId": m["dexId"], "dexSha256": dex["sha256"],
                     "methodIndex": m["methodIndex"], "fieldIndex": f["fieldIndex"],
                     "dexPc": f["dexPc"], "opcode": OPCODE[name],
                     "kind": 2 if name.startswith("write") else 1,
@@ -45,6 +50,8 @@ def verify(catalog, result):
         for key, want in expected.items():
             if event.get(key) != want:
                 raise AssertionError(f"nterp instruction event {n} {key}: {event} != {want}")
+        if event.get("dexPcSource") != "single-candidate DEX site":
+            raise AssertionError("Unverified DEX PC provenance")
         if not event.get("instructionAddress"):
             raise AssertionError("Runtime instruction pointer missing")
     print("PASS: 512 stock ART nterp field operations, exact values and DEX identity")
@@ -55,14 +62,25 @@ def self_test():
     methods = []
     for i, name in enumerate(names):
         op = OPCODE[name]
-        methods.append({"methodName": name, "methodIndex": 10+i, "fields": [
-            {"fieldIndex": i//2, "dexPc": 0}]})
-    cat = {"fixtureMethods": methods}
+        owner = "Lcom/example/artfieldwatch/NoTemplate" + (
+            "Target;" if "Instance" in name else "StaticState;")
+        methods.append({"methodName": name, "methodClass": owner,
+                        "methodIndex": 10+i, "dexId": 0, "fields": [
+            {"fieldIndex": i//2, "dexPc": 0,
+             "fieldName": "value" if "Instance" in name else "shared",
+             "declaringClass": owner}]})
+    cat = {"fixtureMethods": methods, "dexFiles": [{
+        "dexId": 0, "sha256": "0"*64}]}
     rows = []
     for i in range(128):
         for j, name in enumerate(names):
             m = methods[j]
             rows.append({"seq": i*4+j+1, "method": name,
+                         "methodClass": m["methodClass"],
+                         "declaringClass": m["fields"][0]["declaringClass"],
+                         "fieldName": m["fields"][0]["fieldName"],
+                         "fieldType": "I", "dexId": 0, "dexSha256": "0"*64,
+                         "dexPcSource": "single-candidate DEX site",
                          "methodIndex": m["methodIndex"],
                          "fieldIndex": m["fields"][0]["fieldIndex"],
                          "dexPc": 0, "opcode": OPCODE[name],
@@ -84,7 +102,14 @@ def main():
     out = Path(os.environ.get("ARTWATCH_LOG_DIR", "/tmp/artwatch-logs"))
     profile = json.loads((out / "nterp-profile.json").read_text())
     catalog = json.loads((out / "field-sites-release.json").read_text())
-    source = ("globalThis.__artwatchNterpProfile=" + json.dumps(profile) + ";\n" +
+    # Explicit selection is test-only. The probe itself consumes arbitrary
+    # exact field-site selectors from a packaged single-DEX catalog.
+    selected = [{"methodClass": m["methodClass"],
+                 "methodName": m["methodName"],
+                 "fieldName": m["fields"][0]["fieldName"]}
+                for m in catalog["fixtureMethods"]]
+    source = ("globalThis.__artwatchNterpSelectors=" + json.dumps(selected) + ";\n" +
+              "globalThis.__artwatchNterpProfile=" + json.dumps(profile) + ";\n" +
               "globalThis.__artwatchNterpCatalog=" + json.dumps(catalog) + ";\n" +
               (BASE / "nterp-field-probe.js").read_text())
     import frida

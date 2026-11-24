@@ -658,3 +658,19 @@ access. The isolated test pre-initializes the second declaring class before
 arming the recorder so the 512-event measurement does not mix its initial
 class-linking path with the steady-state nterp path. These are experimental
 correctness fixes; no JIT/AOT or exception-coverage claims are implied.
+
+## Data-driven nterp field-site selection
+
+The API33 x86_64 hardware-breakpoint agent now consumes a configurable list
+of exact `methodClass` / `methodName` / `fieldName` selectors from the actual
+packaged DEX catalog, or all supported integer sites if no selectors are
+provided. It no longer embeds the four fixture method names. The separate
+CI oracle supplies those four selectors explicitly and verifies class/field
+names, DEX SHA-256, method/field indices, source metadata, and values.
+
+The current runtime adapter **requires one packaged DEX** and refuses repeated
+same-method/same-field/same-opcode sites, since an ArtMethod DEX method index
+alone cannot safely disambiguate multiple DEX files/class loaders or recover
+multiple source DEX PCs. `dexPcSource=single-candidate DEX site` makes this
+provenance explicit. Runtime code-item binding, multi-DEX and class-loader
+identity are still needed before claiming app-wide monitoring.
