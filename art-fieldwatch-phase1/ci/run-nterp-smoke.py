@@ -22,7 +22,7 @@ OPCODE = {"writeInstance": 0x59, "readInstance": 0x52,
           "writeStatic": 0x67, "readStatic": 0x60}
 
 
-def verify(catalog, result):
+def verify(catalog, result, sequence_stride=4):
     if result.get("ready") is not True or result.get("errors") or result.get("dropped"):
         raise AssertionError(f"nterp backend unavailable or rejected: {result}")
     methods = {m["methodName"]: m for m in catalog["fixtureMethods"]}
@@ -38,7 +38,7 @@ def verify(catalog, result):
         f = m["fields"][0]
         value = (7 + 3*iteration) if "Instance" in name else -11 - 5*iteration
         dex = catalog.get("dexFiles", [{}])[0]
-        expected = {"seq": n + 1, "method": name,
+        expected = {"seq": (n // 4) * sequence_stride + (n % 4) + 1, "method": name,
                     "methodClass": m["methodClass"],
                     "declaringClass": f["declaringClass"],
                     "fieldName": f["fieldName"], "fieldType": "I",
@@ -271,8 +271,13 @@ def main():
         (out / "nterp-probe-messages.json").write_text(json.dumps(events, indent=2))
         leaf_only = {**snapshot, "events": [
             e for e in snapshot["events"] if e.get("method") != "complexStep"]}
-        verify(catalog, leaf_only)
+        verify(catalog, leaf_only, sequence_stride=8)
         verify_nonleaf(catalog, snapshot)
+        if snapshot.get("fieldHits") != 1026 or (
+                snapshot.get("completedHits") != 1024):
+            raise AssertionError("Expected 1026 field handler matches, "
+                                 "1024 completed field operations and "
+                                 "two failed null accesses")
     finally:
         if child.poll() is None:
             child.terminate()
