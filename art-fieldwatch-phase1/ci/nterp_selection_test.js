@@ -10,12 +10,20 @@ const end = file.indexOf('\nfunction install() {', begin);
 assert(begin >= 0 && end > begin, 'Cannot find actual Frida selector');
 function selectForGroup(group) {
   const ctx = vm.createContext({});
-  const ops = group === 'wide64' ? [0x53,0x5a,0x61,0x68] :
-    [0x52,0x59,0x60,0x67];
+  const opcodeGroups = {
+    scalar32: [0x52,0x59,0x60,0x67],
+    wide64: [0x53,0x5a,0x61,0x68],
+    boolean8: [0x55,0x5c,0x63,0x6a],
+    byte8: [0x56,0x5d,0x64,0x6b],
+    char16: [0x57,0x5e,0x65,0x6c],
+    short16: [0x58,0x5f,0x66,0x6d]
+  };
+  const ops = opcodeGroups[group];
   vm.runInContext(
     'const opcodeGroup=' + JSON.stringify(group) + ';\n' +
     'const fieldOps=new Set(' + JSON.stringify(ops) + ');\n' +
-    'const readOps=new Set([0x52,0x53,0x60,0x61]);\n' +
+    'const readOps=new Set([0x52,0x53,0x55,0x56,0x57,0x58,' +
+      '0x60,0x61,0x63,0x64,0x65,0x66]);\n' +
     file.slice(begin, end) + '\nglobalThis.select=selectFieldSites;', ctx);
   return ctx.select;
 }
@@ -89,6 +97,41 @@ const wideDex={...dex,fieldAccesses:wideFields,
   }))};
 assert.equal(selectWide({dexFiles:[wideDex]}).count,4);
 assert.equal(selectWide({dexFiles:[wideDex]}).methods.get(23)[0].sites.get(0).fieldType,'D');
+
+const narrowFamilies = {
+  boolean8: ['Z','boolean',0x55,0x5c,0x63,0x6a],
+  byte8: ['B','byte',0x56,0x5d,0x64,0x6b],
+  char16: ['C','char',0x57,0x5e,0x65,0x6c],
+  short16: ['S','short',0x58,0x5f,0x66,0x6d]
+};
+for (const [group,[descriptor,valueKind,iget,iput,sget,sput]] of
+     Object.entries(narrowFamilies)) {
+  const selectNarrow=selectForGroup(group);
+  const opcodes=[iput,sput,iget,sget];
+  const narrow=fields.map((f,i)=>({
+    ...f,methodIndex:30+i,methodName:group+'Site'+i,
+    fieldType:descriptor,valueKind,
+    operation:i<2?'write':'read',
+    access:i%2===0?'instance':'static',
+    opcode:'0x'+opcodes[i].toString(16)
+  }));
+  const narrowDex={...dex,fieldAccesses:narrow,
+    fieldMethods:narrow.map(f=>({
+      methodIndex:f.methodIndex,methodClass:f.methodClass,
+      methodName:f.methodName,insnsSize:2,insnsHex:codeFor(f)
+    }))};
+  assert.equal(selectNarrow({dexFiles:[narrowDex]}).count,4);
+  for (let i=0;i<4;i++) {
+    const site=selectNarrow({dexFiles:[narrowDex]}).methods
+      .get(30+i)[0].sites.get(0);
+    assert.equal(site.kind,i<2?2:1);
+    assert.equal(site.fieldType,descriptor);
+  }
+  const wrongDescriptor={...narrowDex,
+    fieldAccesses:[{...narrow[0],fieldType:'I'},...narrow.slice(1)]};
+  assert.equal(selectNarrow({dexFiles:[wrongDescriptor]}).count,3);
+  assert.throws(()=>select({dexFiles:[narrowDex]}));
+}
 const second = {...dex,dexId:1,sha256:'b'.repeat(64),
   fieldAccesses:[{...fields[0],methodName:'otherMethod',
     methodIndex:10,fieldName:'c',fieldIndex:7}],

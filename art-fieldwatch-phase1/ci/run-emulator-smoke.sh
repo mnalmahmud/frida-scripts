@@ -82,9 +82,16 @@ fi
 # Experimental *instruction-level* nterp backend on unmodified ART.
 # A separate process avoids previous JIT warmup / method-hook interference.
 if [[ "$variant" == release && "${ARTWATCH_SHADOW_SHIM:-0}" == 1 ]]; then
-  ARTWATCH_NTERP_GROUP=scalar32 python3 art-fieldwatch-phase1/ci/run-nterp-smoke.py
-  # The first run leaves an idle isolated Activity process; force a fresh
-  # process for the wide64 family, so Frida spawn gating sees its creation.
-  adb shell am force-stop com.example.artfieldwatch
-  ARTWATCH_NTERP_GROUP=wide64 python3 art-fieldwatch-phase1/ci/run-nterp-smoke.py
+  # Every opcode group consumes all four hardware breakpoint slots. Run each
+  # group in a fresh, non-debuggable release process; never present this as
+  # simultaneous app-wide coverage.
+  first_group=1
+  for group in scalar32 wide64 boolean8 byte8 char16 short16; do
+    if [[ "$first_group" == 0 ]]; then
+      adb shell am force-stop com.example.artfieldwatch
+    fi
+    first_group=0
+    echo "Stock ART nterp field opcode group: $group"
+    ARTWATCH_NTERP_GROUP="$group" python3 art-fieldwatch-phase1/ci/run-nterp-smoke.py
+  done
 fi

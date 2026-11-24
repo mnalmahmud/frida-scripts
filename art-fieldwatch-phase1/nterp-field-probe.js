@@ -18,7 +18,11 @@ const opcodeGroup = globalThis.__artwatchNterpOpcodeGroup ?? 'scalar32';
 // per run, without pretending a partial family provides app-wide coverage.
 const opcodeGroups = Object.freeze({
   scalar32: Object.freeze([0x52, 0x59, 0x60, 0x67]),
-  wide64: Object.freeze([0x53, 0x5a, 0x61, 0x68])
+  wide64: Object.freeze([0x53, 0x5a, 0x61, 0x68]),
+  boolean8: Object.freeze([0x55, 0x5c, 0x63, 0x6a]),
+  byte8: Object.freeze([0x56, 0x5d, 0x64, 0x6b]),
+  char16: Object.freeze([0x57, 0x5e, 0x65, 0x6c]),
+  short16: Object.freeze([0x58, 0x5f, 0x66, 0x6d])
 });
 const opcodes = opcodeGroups[opcodeGroup];
 const MAX_RECORDS = 4096;
@@ -40,7 +44,8 @@ let callbacks = 0;
 let ready = false;
 let armed = false;
 const fieldOps = new Set(opcodes || []);
-const readOps = new Set([0x52, 0x53, 0x60, 0x61]);
+const readOps = new Set([0x52, 0x53, 0x55, 0x56, 0x57, 0x58,
+  0x60, 0x61, 0x63, 0x64, 0x65, 0x66]);
 // The first continuation after a field access may be a move, nop, or return.
 // A larger watcher must subscribe to every opcode or a shared dispatch edge.
 
@@ -120,10 +125,17 @@ function selectFieldSites(data, selectors) {
     }
     for (const field of dex.fieldAccesses) {
       const opcode = Number.parseInt(field.opcode,16);
-      if (!fieldOps.has(opcode) ||
-          (opcodeGroup === 'wide64'
-            ? field.valueKind !== 'wide' || !['J','D'].includes(field.fieldType)
-            : field.valueKind !== 'int' || !['I','F'].includes(field.fieldType)))
+      const expected = {
+        scalar32: [['int'], ['I','F']],
+        wide64: [['wide'], ['J','D']],
+        boolean8: [['boolean'], ['Z']],
+        byte8: [['byte'], ['B']],
+        char16: [['char'], ['C']],
+        short16: [['short'], ['S']]
+      }[opcodeGroup];
+      if (!fieldOps.has(opcode) || !expected ||
+          !expected[0].includes(field.valueKind) ||
+          !expected[1].includes(field.fieldType))
         continue;
       const identity=[field.methodClass,field.methodName,field.fieldName].join('\0');
       if (identities !== null && !identities.has(identity)) continue;
@@ -180,7 +192,7 @@ function selectFieldSites(data, selectors) {
   return {methods,count};
 }
 function install() {
-  if (!opcodes || !['scalar32','wide64'].includes(opcodeGroup))
+  if (!opcodes || !Object.hasOwn(opcodeGroups,opcodeGroup))
     throw new Error('Unrecognized or missing nterp opcode group');
   if (!profile || profile.api !== 33 || profile.architecture !== 'x86_64' ||
       Process.arch !== 'x64' || Process.pointerSize !== 8 ||
@@ -301,7 +313,16 @@ function install() {
       const hi = slot.add(4).readU32().toString(16).padStart(8, '0');
       return '0x' + hi + lo;
     }
-    return descriptor === 'F' ? slot.readU32() : slot.readS32();
+    if (descriptor === 'F') return slot.readU32();
+    const value = slot.readS32();
+    // For writes, the DEX handler stores the narrow field width; sample
+    // exactly that width, not untruncated source vreg bits. For reads, the
+    // handler sign/zero extends into the 32-bit destination vreg.
+    if (descriptor === 'Z') return value & 0xff;
+    if (descriptor === 'B') return (value << 24) >> 24;
+    if (descriptor === 'C') return value & 0xffff;
+    if (descriptor === 'S') return (value << 16) >> 16;
+    return value;
   }
 
   function beginField(context,state,opcode) {
@@ -362,7 +383,11 @@ function install() {
       valueRepresentation:
         f.fieldType==='F'?'raw-u32-ieee754':
         f.fieldType==='D'?'raw-u64-ieee754':
-        f.fieldType==='J'?'raw-u64-le':'signed-int32',
+        f.fieldType==='J'?'raw-u64-le':
+        f.fieldType==='Z'?'unsigned-boolean-byte':
+        f.fieldType==='B'?'signed-int8':
+        f.fieldType==='C'?'unsigned-int16':
+        f.fieldType==='S'?'signed-int16':'signed-int32',
       dexId:f.dexId,dexSha256:f.dexSha256,
       methodIndex:f.methodIndex,fieldIndex:f.fieldId,dexPc:f.dexPc,
       dexPcSource:'live instruction base verified against packaged DEX bytes',

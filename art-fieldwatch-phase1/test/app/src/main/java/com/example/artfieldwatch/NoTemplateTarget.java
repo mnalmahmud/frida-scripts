@@ -7,6 +7,10 @@ public final class NoTemplateTarget {
   private float floating;
   private long large;
   private double precise;
+  private boolean flag;
+  private byte tiny;
+  private char glyph;
+  private short small;
 
   public static void writeInstance(NoTemplateTarget receiver, int x) {
     receiver.value = x;
@@ -38,6 +42,31 @@ public final class NoTemplateTarget {
 
   public static double readInstanceDouble(NoTemplateTarget receiver) {
     return receiver.precise;
+  }
+
+  public static void writeInstanceBoolean(NoTemplateTarget receiver, boolean value) {
+    receiver.flag = value;
+  }
+  public static boolean readInstanceBoolean(NoTemplateTarget receiver) {
+    return receiver.flag;
+  }
+  public static void writeInstanceByte(NoTemplateTarget receiver, byte value) {
+    receiver.tiny = value;
+  }
+  public static byte readInstanceByte(NoTemplateTarget receiver) {
+    return receiver.tiny;
+  }
+  public static void writeInstanceChar(NoTemplateTarget receiver, char value) {
+    receiver.glyph = value;
+  }
+  public static char readInstanceChar(NoTemplateTarget receiver) {
+    return receiver.glyph;
+  }
+  public static void writeInstanceShort(NoTemplateTarget receiver, short value) {
+    receiver.small = value;
+  }
+  public static short readInstanceShort(NoTemplateTarget receiver) {
+    return receiver.small;
   }
 
   // Non-leaf DEX method: 2 field writes and 2 reads with intervening
@@ -107,6 +136,34 @@ public final class NoTemplateTarget {
       if (Double.doubleToRawLongBits(readInstanceDouble(receiver)) != doubleBits ||
           Double.doubleToRawLongBits(NoTemplateStaticState.readStaticDouble()) != staticDoubleBits)
         throw new AssertionError("Double field raw bits mismatch at " + i);
+      boolean instanceBoolean = (i & 1) == 0;
+      boolean staticBoolean = i % 3 == 0;
+      writeInstanceBoolean(receiver, instanceBoolean);
+      NoTemplateStaticState.writeStaticBoolean(staticBoolean);
+      if (readInstanceBoolean(receiver) != instanceBoolean ||
+          NoTemplateStaticState.readStaticBoolean() != staticBoolean)
+        throw new AssertionError("Boolean field mismatch at " + i);
+      byte instanceByte = (byte)(i * 7 - 129);
+      byte staticByte = (byte)(127 - i * 5);
+      writeInstanceByte(receiver, instanceByte);
+      NoTemplateStaticState.writeStaticByte(staticByte);
+      if (readInstanceByte(receiver) != instanceByte ||
+          NoTemplateStaticState.readStaticByte() != staticByte)
+        throw new AssertionError("Signed byte field mismatch at " + i);
+      char instanceChar = (char)(0x8000 + i * 257);
+      char staticChar = (char)(0xffff - i * 263);
+      writeInstanceChar(receiver, instanceChar);
+      NoTemplateStaticState.writeStaticChar(staticChar);
+      if (readInstanceChar(receiver) != instanceChar ||
+          NoTemplateStaticState.readStaticChar() != staticChar)
+        throw new AssertionError("Unsigned char field mismatch at " + i);
+      short instanceShort = (short)(0x8000 + i * 263);
+      short staticShort = (short)(0x7fff - i * 311);
+      writeInstanceShort(receiver, instanceShort);
+      NoTemplateStaticState.writeStaticShort(staticShort);
+      if (readInstanceShort(receiver) != instanceShort ||
+          NoTemplateStaticState.readStaticShort() != staticShort)
+        throw new AssertionError("Signed short field mismatch at " + i);
       checksum += observedInstance + observedStatic;
     }
     int failed = 0;
@@ -127,6 +184,10 @@ final class NoTemplateStaticState {
   private static float floating;
   private static long sharedLong;
   private static double sharedDouble;
+  private static boolean sharedBoolean;
+  private static byte sharedByte;
+  private static char sharedChar;
+  private static short sharedShort;
   static void writeStatic(int x) { shared = x; }
   static int readStatic() { return shared; }
   static void writeStaticFloat(float value) { floating = value; }
@@ -135,4 +196,12 @@ final class NoTemplateStaticState {
   static long readStaticLong() { return sharedLong; }
   static void writeStaticDouble(double value) { sharedDouble = value; }
   static double readStaticDouble() { return sharedDouble; }
+  static void writeStaticBoolean(boolean value) { sharedBoolean = value; }
+  static boolean readStaticBoolean() { return sharedBoolean; }
+  static void writeStaticByte(byte value) { sharedByte = value; }
+  static byte readStaticByte() { return sharedByte; }
+  static void writeStaticChar(char value) { sharedChar = value; }
+  static char readStaticChar() { return sharedChar; }
+  static void writeStaticShort(short value) { sharedShort = value; }
+  static short readStaticShort() { return sharedShort; }
 }

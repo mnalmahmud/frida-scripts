@@ -43,6 +43,41 @@ WIDE_FIELDS = {
     "readStaticDouble": ("D", "sharedDouble")
 }
 MASK64 = (1 << 64) - 1
+# One four-breakpoint family is armed per process and test invocation.
+NARROW = {
+    "boolean8": ("Boolean", "Z", "flag", "sharedBoolean", "boolean",
+                 (0x5c,0x6a,0x55,0x63), "unsigned-boolean-byte"),
+    "byte8": ("Byte", "B", "tiny", "sharedByte", "byte",
+              (0x5d,0x6b,0x56,0x64), "signed-int8"),
+    "char16": ("Char", "C", "glyph", "sharedChar", "char",
+               (0x5e,0x6c,0x57,0x65), "unsigned-int16"),
+    "short16": ("Short", "S", "small", "sharedShort", "short",
+                (0x5f,0x6d,0x58,0x66), "signed-int16"),
+}
+
+
+def narrow_names(group):
+    title = NARROW[group][0]
+    return (f"writeInstance{title}", f"writeStatic{title}",
+            f"readInstance{title}", f"readStatic{title}")
+
+
+def signed_narrow(value, bits):
+    value &= (1 << bits) - 1
+    return value - (1 << bits) if value >= (1 << (bits - 1)) else value
+
+
+def narrow_values(group, i):
+    if group == "boolean8":
+        return (1 if i % 2 == 0 else 0, 1 if i % 3 == 0 else 0)
+    if group == "byte8":
+        return signed_narrow(i * 7 - 129, 8), signed_narrow(127-i*5, 8)
+    if group == "char16":
+        return (0x8000+i*257)&0xffff, (0xffff-i*263)&0xffff
+    if group == "short16":
+        return signed_narrow(0x8000+i*263,16), signed_narrow(0x7fff-i*311,16)
+    raise ValueError("Unsupported narrow group")
+
 
 
 def verify(catalog, result, sequence_stride=4):
@@ -390,18 +425,152 @@ def wide_self_test():
     print("nterp wide-field verifier self-test passed")
 
 
+def verify_narrow(catalog, result, group):
+    if group not in NARROW:
+        raise AssertionError("Unrecognized narrow verifier group")
+    if (result.get("ready") is not True or
+            result.get("opcodeGroup") != group or result.get("errors") or
+            result.get("dropped") or result.get("unverifiedSites") or
+            result.get("pending")):
+        raise AssertionError("Narrow nterp backend did not complete cleanly")
+    if len(catalog["dexFiles"]) != 1:
+        raise AssertionError("Narrow runtime fixture requires one packaged DEX")
+    dex = catalog["dexFiles"][0]
+    title,desc,inst_name,static_name,kind,opcodes,representation=NARROW[group]
+    names=narrow_names(group)
+    sites=[]
+    for j,name in enumerate(names):
+        owner = ("Lcom/example/artfieldwatch/NoTemplateTarget;"
+                 if "Instance" in name else
+                 "Lcom/example/artfieldwatch/NoTemplateStaticState;")
+        found=[f for f in dex["fieldAccesses"]
+               if f["methodName"]==name and f["methodClass"]==owner]
+        if len(found)!=1:
+            raise AssertionError(f"Expected one packaged DEX field site: {name}")
+        site=found[0]
+        if (site["fieldName"] != (inst_name if "Instance" in name else static_name) or
+                site["fieldType"] != desc or site["valueKind"] != kind or
+                int(site["opcode"],16) != opcodes[j] or
+                site["operation"] != ("write" if j<2 else "read")):
+            raise AssertionError(f"Wrong narrow opcode/field type in {name}: {site}")
+        sites.append(site)
+    events=result["events"]
+    if len(events)!=512 or result.get("fieldHits")!=512 or result.get("completedHits")!=512:
+        raise AssertionError(f"Expected 512 executed {group} field accesses")
+    live_methods={}
+    for i in range(128):
+        instance,static=narrow_values(group,i)
+        for j,name in enumerate(names):
+            event=events[4*i+j]
+            site=sites[j]
+            expected={
+                "seq":4*i+j+1,"method":name,
+                "methodClass":site["methodClass"],
+                "declaringClass":site["declaringClass"],
+                "fieldName":inst_name if "Instance" in name else static_name,
+                "fieldType":desc,"valueRepresentation":representation,
+                "dexId":dex["dexId"],"dexSha256":dex["sha256"],
+                "methodIndex":site["methodIndex"],
+                "fieldIndex":site["fieldIndex"],"dexPc":site["dexPc"],
+                "opcode":opcodes[j],
+                "kind":2 if j<2 else 1,
+                "value":instance if j%2==0 else static,
+                "dexPcSource":"live instruction base verified against packaged DEX bytes",
+            }
+            for key,value in expected.items():
+                if event.get(key)!=value:
+                    raise AssertionError(
+                        f"{group} iteration={i} pos={j} {key}: "
+                        f"{event.get(key)!r} != {value!r}")
+            method=event.get("runtimeMethodAddress")
+            instruction=event.get("instructionAddress")
+            if not method or not instruction:
+                raise AssertionError("Missing runtime method or instruction pointer")
+            identity=(event["dexSha256"],event["dexId"],event["methodIndex"])
+            binding=(method,int(instruction,16)-2*event["dexPc"])
+            previous=live_methods.setdefault(identity,binding)
+            if previous!=binding:
+                raise AssertionError(f"Runtime DEX binding changed: {identity}")
+    if result.get("verifiedRuntimeMethods")!=len(live_methods):
+        raise AssertionError("Narrow runtime method binding count mismatch")
+    print(f"PASS: 512 stock ART nterp {group} field accesses, exact values and DEX PCs")
+
+
+def narrow_self_test():
+    for group in NARROW:
+        title,desc,inst_name,static_name,kind,opcodes,representation=NARROW[group]
+        names=narrow_names(group)
+        dex={"dexId":0,"sha256":"a"*64,"fieldAccesses":[]}
+        for j,name in enumerate(names):
+            owner=("Lcom/example/artfieldwatch/NoTemplateTarget;"
+                   if "Instance" in name else
+                   "Lcom/example/artfieldwatch/NoTemplateStaticState;")
+            dex["fieldAccesses"].append({
+                "methodName":name,"methodClass":owner,"declaringClass":owner,
+                "fieldName":inst_name if "Instance" in name else static_name,
+                "fieldType":desc,"valueKind":kind,
+                "methodIndex":40+j,"fieldIndex":10+j,"dexPc":0,
+                "opcode":f"0x{opcodes[j]:02x}",
+                "operation":"write" if j<2 else "read"
+            })
+        rows=[]
+        for i in range(128):
+            instance,static=narrow_values(group,i)
+            for j,name in enumerate(names):
+                site=dex["fieldAccesses"][j]
+                rows.append({
+                    "seq":4*i+j+1,"method":name,
+                    "methodClass":site["methodClass"],
+                    "declaringClass":site["declaringClass"],
+                    "fieldName":site["fieldName"],"fieldType":desc,
+                    "valueRepresentation":representation,
+                    "dexId":0,"dexSha256":"a"*64,
+                    "methodIndex":site["methodIndex"],
+                    "fieldIndex":site["fieldIndex"],"dexPc":0,
+                    "opcode":opcodes[j],"kind":2 if j<2 else 1,
+                    "value":instance if j%2==0 else static,
+                    "dexPcSource":"live instruction base verified against packaged DEX bytes",
+                    "runtimeMethodAddress":f"0x{0x1000+j*16:x}",
+                    "instructionAddress":f"0x{0x2000+j*16:x}"
+                })
+        snapshot={"ready":True,"opcodeGroup":group,"events":rows,
+                  "errors":[],"dropped":0,"unverifiedSites":0,
+                  "pending":0,"fieldHits":512,"completedHits":512,
+                  "verifiedRuntimeMethods":4}
+        verify_narrow({"dexFiles":[dex]},snapshot,group)
+        for bad in (
+            {**snapshot,"events":rows[:-1]},
+            {**snapshot,"events":[{**rows[0],"value":999},*rows[1:]]},
+            {**snapshot,"completedHits":511},
+            {**snapshot,"unverifiedSites":1}
+        ):
+            try: verify_narrow({"dexFiles":[dex]},bad,group)
+            except AssertionError: pass
+            else: raise AssertionError(f"Corrupt {group} trace accepted")
+    print("nterp narrow-field verifier self-tests passed")
+
+
 def main():
     if os.environ.get("ARTWATCH_BUILD_VARIANT") != "release":
         raise RuntimeError("Only the non-debuggable release APK is supported")
     opcode_group = os.environ.get("ARTWATCH_NTERP_GROUP", "scalar32")
-    if opcode_group not in ("scalar32", "wide64"):
+    if opcode_group not in ("scalar32", "wide64", *NARROW):
         raise RuntimeError("Unsupported ARTWATCH_NTERP_GROUP")
     out = Path(os.environ.get("ARTWATCH_LOG_DIR", "/tmp/artwatch-logs"))
     profile = json.loads((out / "nterp-profile.json").read_text())
     catalog = json.loads((out / "field-sites-release.json").read_text())
     # Explicit selection is test-only. The probe itself consumes arbitrary
     # exact field-site selectors from a packaged single-DEX catalog.
-    if opcode_group == "wide64":
+    if opcode_group in NARROW:
+        _,_,inst_name,static_name,_,_,_=NARROW[opcode_group]
+        selected=[{
+            "methodClass": ("Lcom/example/artfieldwatch/NoTemplateTarget;"
+                            if "Instance" in name else
+                            "Lcom/example/artfieldwatch/NoTemplateStaticState;"),
+            "methodName":name,
+            "fieldName":inst_name if "Instance" in name else static_name
+        } for name in narrow_names(opcode_group)]
+    elif opcode_group == "wide64":
         selected = [{
             "methodClass": ("Lcom/example/artfieldwatch/NoTemplateTarget;"
                             if "Instance" in name else
@@ -537,6 +706,8 @@ def main():
             json.dumps(events, indent=2))
         if opcode_group == "wide64":
             verify_wide(catalog, snapshot)
+        elif opcode_group in NARROW:
+            verify_narrow(catalog, snapshot, opcode_group)
         else:
             leaf_only = {**snapshot, "events": [
                 e for e in snapshot["events"] if e.get("method") in ORDER]}
@@ -578,5 +749,6 @@ if __name__ == "__main__":
     if sys.argv[1:] == ["--self-test"]:
         self_test()
         wide_self_test()
+        narrow_self_test()
     else:
         main()

@@ -809,3 +809,39 @@ DexFile identity is authenticated independently.
 The existing synthetic release fixture is still single-DEX. Multi-DEX
 selection and method-index collisions are currently static regression
 tests only; runtime execution across distinct DexFiles remains pending.
+
+## Narrow primitive nterp field opcode families (2026-11-25)
+
+The pinned API33 x86_64 interpreter backend additionally supports four
+independent four-breakpoint passes: `boolean8` (`iget/iput/sget/sput-boolean`,
+0x55/0x5c/0x63/0x6a), `byte8` (0x56/0x5d/0x64/0x6b), `char16`
+(0x57/0x5e/0x65/0x6c), and `short16` (0x58/0x5f/0x66/0x6d).
+The catalog requires the matching field DEX descriptor (`Z`, `B`,
+`C`, or `S`) and valueKind; mismatches are not reported.
+
+The observer reads from the nterp interpreter's 32-bit virtual register
+slots at the hardware trap (before a write / after a read), normalizing
+the result to the actual stored narrow width: unsigned 8-bit for Boolean
+(`unsigned-boolean-byte`), signed 8-bit for byte (`signed-int8`),
+unsigned 16-bit for char (`unsigned-int16`), signed 16-bit for short
+(`signed-int16`). This is a raw byte representation for Boolean, not
+a claim that arbitrary noncanonical Boolean byte patterns have been
+tested. No live object reference is converted to a JS/Java wrapper.
+
+The non-debuggable release APK contains separate instance/static
+setter/getter methods and 128 iterations of changing boundary-crossing
+values per type. The CI harness runs each opcode family in a separate
+process, validates the exact packaged DEX instructions and runtime DEX
+PC/ArtMethod binding, and requires **512 exact events per family**
+(2,048 additional accesses across the four narrow passes). Static
+oracle tests reject malformed values, missing events, incorrect field
+opcodes, and mismatched metadata. This is **not** simultaneous all-field
+coverage: only one opcode group fits the four hardware execution
+breakpoint slots at a time.
+
+Across scalar32, wide64 and the four narrow families, the current
+fixture expects 5,120 exact field-access events over six isolated
+measurements. The backend remains limited to one pinned ART build,
+nterp execution, selected methods and their matched DEX bytes. It
+does not cover compiled field accesses, object references, or all
+threads of arbitrary applications.
