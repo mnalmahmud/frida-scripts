@@ -50,10 +50,12 @@ def verify(catalog, result, sequence_stride=4):
         for key, want in expected.items():
             if event.get(key) != want:
                 raise AssertionError(f"nterp instruction event {n} {key}: {event} != {want}")
-        if event.get("dexPcSource") != "single-candidate DEX site":
+        if event.get("dexPcSource") != "live instruction base verified against packaged DEX bytes":
             raise AssertionError("Unverified DEX PC provenance")
         if not event.get("instructionAddress"):
             raise AssertionError("Runtime instruction pointer missing")
+        if not event.get("runtimeMethodAddress"):
+            raise AssertionError("Observed ArtMethod identity missing")
     print("PASS: 512 stock ART nterp field operations, exact values and DEX identity")
 
 
@@ -80,13 +82,14 @@ def self_test():
                          "declaringClass": m["fields"][0]["declaringClass"],
                          "fieldName": m["fields"][0]["fieldName"],
                          "fieldType": "I", "dexId": 0, "dexSha256": "0"*64,
-                         "dexPcSource": "single-candidate DEX site",
+                         "dexPcSource": "live instruction base verified against packaged DEX bytes",
                          "methodIndex": m["methodIndex"],
                          "fieldIndex": m["fields"][0]["fieldIndex"],
                          "dexPc": 0, "opcode": OPCODE[name],
                          "kind": 2 if name.startswith("write") else 1,
                          "value": 7+3*i if "Instance" in name else -11-5*i,
-                         "instructionAddress": "0x1234"})
+                         "instructionAddress": "0x1234",
+                         "runtimeMethodAddress": "0x5678"})
     verify(cat, {"ready": True, "events": rows, "errors": [], "dropped": 0})
     for bad in (rows[:-1], rows + [rows[-1]],
                 [{**rows[0], "value": 0}, *rows[1:]]):
@@ -117,11 +120,27 @@ def verify_nonleaf(catalog, result):
     if len({f["fieldIndex"] for f in sites}) != 2 or (
             len({f["methodIndex"] for f in sites}) != 1):
         raise AssertionError("Non-leaf method/field IDs ambiguous")
+    repeated = [f for f in dex["fieldAccesses"]
+                if f.get("methodClass") == "Lcom/example/artfieldwatch/NoTemplateTarget;"
+                and f.get("methodName") == "repeatedStep"]
+    repeated.sort(key=lambda f: f["dexPc"])
+    repeat_kinds = [
+        ("value", "write", 0x59), ("value", "read", 0x52),
+        ("value", "write", 0x59), ("value", "read", 0x52),
+    ]
+    if len(repeated) != 4 or [
+        (f["fieldName"],f["operation"],int(f["opcode"],16))
+        for f in repeated] != repeat_kinds:
+        raise AssertionError("Packaged repeatedStep DEX lacks four repeated field sites")
+    if (len({f["dexPc"] for f in repeated}) != 4 or
+            len({f["fieldIndex"] for f in repeated}) != 1 or
+            len({f["methodIndex"] for f in repeated}) != 1):
+        raise AssertionError("Repeated DEX site identity not preserved")
     events = result["events"]
-    if len(events) != 1024:
-        raise AssertionError(f"Expected 1024 opcode events, got {len(events)}")
+    if len(events) != 1536:
+        raise AssertionError(f"Expected 1536 opcode events, got {len(events)}")
     for i in range(128):
-        part = events[8*i:8*i+8]
+        part = events[12*i:12*i+12]
         if [e["method"] for e in part[:4]] != list(ORDER):
             raise AssertionError("Leaf order changed in non-leaf experiment")
         for j, (site, (field_name, operation, opcode)) in enumerate(
@@ -129,7 +148,7 @@ def verify_nonleaf(catalog, result):
             e = part[4+j]
             expected = 7 + 3*i if field_name == "value" else 8 + 3*i
             fields = {
-                "seq": 8*i+5+j, "method": "complexStep",
+                "seq": 12*i+5+j, "method": "complexStep",
                 "methodClass": site["methodClass"],
                 "declaringClass": site["declaringClass"],
                 "fieldName": field_name, "fieldType": "I",
@@ -142,9 +161,30 @@ def verify_nonleaf(catalog, result):
             for k, v in fields.items():
                 if e.get(k) != v:
                     raise AssertionError(f"Non-leaf event iteration={i}, site={j}, {k}: {e.get(k)!r} != {v!r}")
-            if e.get("dexPcSource") != "single-candidate DEX site":
+            if e.get("dexPcSource") != "live instruction base verified against packaged DEX bytes":
                 raise AssertionError("Non-leaf DEX PC provenance missing")
-    print("PASS: 512 non-leaf nterp field accesses across ordinary DEX successors")
+        for j, (site, (_, operation, opcode)) in enumerate(zip(repeated, repeat_kinds)):
+            e = part[8+j]
+            expected = 7 + 3*i + (2 if j >= 2 else 0)
+            fields = {
+                "seq": 12*i+9+j, "method": "repeatedStep",
+                "methodClass": site["methodClass"],
+                "declaringClass": site["declaringClass"],
+                "fieldName": "value", "fieldType": "I",
+                "dexId": dex["dexId"], "dexSha256": dex["sha256"],
+                "methodIndex": site["methodIndex"],
+                "fieldIndex": site["fieldIndex"], "dexPc": site["dexPc"],
+                "opcode": opcode,"kind": 2 if operation == "write" else 1,
+                "value": expected
+            }
+            for k, v in fields.items():
+                if e.get(k) != v:
+                    raise AssertionError(f"Repeated field event iteration={i} site={j} {k}: {e.get(k)!r} != {v!r}")
+            if e.get("dexPcSource") != "live instruction base verified against packaged DEX bytes":
+                raise AssertionError("Repeated field DEX PC was inferred")
+    if result.get("unverifiedSites"):
+        raise AssertionError("Observed fields without verified live DEX site identity")
+    print("PASS: 1024 non-leaf and repeated-site DEX field accesses, verified live PCs")
 
 
 def main():
@@ -162,6 +202,8 @@ def main():
     selected.extend({"methodClass":"Lcom/example/artfieldwatch/NoTemplateTarget;",
                      "methodName":"complexStep","fieldName":name}
                     for name in ("value","other"))
+    selected.append({"methodClass":"Lcom/example/artfieldwatch/NoTemplateTarget;",
+                     "methodName":"repeatedStep","fieldName":"value"})
     source = ("globalThis.__artwatchNterpThreadFilter=" +
               json.dumps("NterpFieldProbe") + ";\n" +
               "globalThis.__artwatchNterpSelectors=" + json.dumps(selected) + ";\n" +
@@ -271,12 +313,12 @@ def main():
         (out / "nterp-probe-messages.json").write_text(json.dumps(events, indent=2))
         leaf_only = {**snapshot, "events": [
             e for e in snapshot["events"] if e.get("method") != "complexStep"]}
-        verify(catalog, leaf_only, sequence_stride=8)
+        verify(catalog, leaf_only, sequence_stride=12)
         verify_nonleaf(catalog, snapshot)
-        if snapshot.get("fieldHits") != 1026 or (
-                snapshot.get("completedHits") != 1024):
-            raise AssertionError("Expected 1026 field handler matches, "
-                                 "1024 completed field operations and "
+        if snapshot.get("fieldHits") != 1538 or (
+                snapshot.get("completedHits") != 1536):
+            raise AssertionError("Expected 1538 field handler matches, "
+                                 "1536 completed field operations and "
                                  "two failed null accesses")
     finally:
         if child.poll() is None:
