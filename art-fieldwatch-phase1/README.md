@@ -701,3 +701,32 @@ method calls and ordinary computations. The runtime oracle now verifies the
 original 512 leaf accesses and **512 additional non-leaf field accesses** in
 DEX order and with exact integer values. If the packaged DEX does not retain
 all four non-leaf operations, CI must reject it before claiming coverage.
+
+## Runtime DEX PC binding and repeated field operations (2026-11-24)
+
+The stock nterp hardware-breakpoint backend now requires the catalog to
+contain exact instruction bytes for every field-bearing DEX method. At the
+executed field handler, it takes the **live** nterp DEX instruction address,
+finds a candidate method instruction base using the packaged site offset,
+then checks the complete method instruction bytes against readable process
+memory before accepting that site. It caches the base by observed ArtMethod
+address and reports `runtimeMethodAddress` alongside the resolved DEX PC.
+
+This replaces the former single-candidate inference. Multiple accesses to
+the same opcode/field ID in one method are now represented by distinct DEX PC
+keys. Unmatched or ambiguous code bytes yield no event, with an explicit
+`unverifiedSites` diagnostic counter. If ART quickens or alters instructions
+relative to the packaged DEX, the current implementation rejects that method
+instead of pretending the packaged PC is proven.
+
+The non-debuggable isolated workload adds `repeatedStep`, with two writes
+and two reads of the same instance field, and retains `complexStep`.
+The strengthened CI oracle requires 1,536 executed field operations in the
+original order, including 512 repeated-site operations, exact read/write values,
+DEX PCs, and two failed null accesses with no successful events.
+
+This verifies instruction identity **within one exact packaged DEX** only.
+It does not authenticate the class loader for the observed ArtMethod,
+instrument quickened field opcodes, or extend coverage beyond the explicitly
+verified API33 x86_64 nterp build. The live full-method byte comparison is a
+correctness gate, not a generic decompilation/resolution mechanism.
