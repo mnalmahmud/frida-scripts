@@ -108,7 +108,9 @@ def main():
                  "methodName": m["methodName"],
                  "fieldName": m["fields"][0]["fieldName"]}
                 for m in catalog["fixtureMethods"]]
-    source = ("globalThis.__artwatchNterpSelectors=" + json.dumps(selected) + ";\n" +
+    source = ("globalThis.__artwatchNterpThreadFilter=" +
+              json.dumps("NterpFieldProbe") + ";\n" +
+              "globalThis.__artwatchNterpSelectors=" + json.dumps(selected) + ";\n" +
               "globalThis.__artwatchNterpProfile=" + json.dumps(profile) + ";\n" +
               "globalThis.__artwatchNterpCatalog=" + json.dumps(catalog) + ";\n" +
               (BASE / "nterp-field-probe.js").read_text())
@@ -220,6 +222,12 @@ def main():
             child.wait(timeout=5)
         device.disable_spawn_gating()
         device.off("spawn-added", on_spawn)
+        if "script" in results:
+            try:
+                cleanup = results["script"].exports_sync.stop()
+                trace.append("nterp cleanup: " + json.dumps(cleanup))
+            except Exception as e:
+                trace.append("nterp cleanup failed: " + str(e))
         if "session" in results:
             results["session"].detach()
         for worker in joined:

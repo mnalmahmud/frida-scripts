@@ -12,6 +12,7 @@
 const profile = globalThis.__artwatchNterpProfile;
 const catalog = globalThis.__artwatchNterpCatalog;
 const selectors = globalThis.__artwatchNterpSelectors;
+const threadFilter = globalThis.__artwatchNterpThreadFilter;
 const MAX_RECORDS = 2048;
 const active = new Map();
 const records = [];
@@ -152,6 +153,9 @@ function install() {
       Process.arch !== 'x64' || Process.pointerSize !== 8 ||
       profile.handlerSize !== 128 || profile.opcodeCount !== 256)
     throw new Error('Unsupported ART / nterp ABI');
+  if (typeof threadFilter !== 'string' || threadFilter.length === 0 ||
+      threadFilter.length > 128)
+    throw new Error('Provide an exact thread name or * to watch all threads');
   const selected = selectFieldSites(catalog,selectors);
   const methods = selected.methods;
   const art = Process.findModuleByName('libart.so');
@@ -176,8 +180,12 @@ function install() {
   }
 
   function installForThread(t) {
-    if (!armed || t.name !== 'NterpFieldProbe' ||
+    if (!armed || (threadFilter !== '*' && t.name !== threadFilter) ||
         observedThreads.has(t.id)) return;
+    if (observedThreads.size >= 64) {
+      recordDiagnostic('Thread watch limit exceeded (64)');
+      return;
+    }
     const state = {thread:t, slots:new Map(), pending:null};
     try {
       for (const op of ops) {
@@ -323,7 +331,7 @@ function install() {
   }
 
   function armThreads() {
-    // Only the synthetic Java worker is instrumented in this first proof.
+    // Watch the configured thread name, or explicitly * for every thread.
     // Process.attachThreadObserver sees existing threads and future renames.
     Process.setExceptionHandler(handleException);
     armed=true;
@@ -338,6 +346,7 @@ function install() {
   ready=true;
   send({type:'artwatch-nterp-init',ready:true,mode:'hardware-breakpoint',
     buildId,candidateHandlers:ops.length,selectedFieldSites:selected.count,
+    threadFilter,
     attachedHandlers:0,
     moduleBase:art.base.toString(),handlerTable:base.toString()});
   return armThreads;
@@ -353,6 +362,21 @@ rpc.exports={
       if(threadObserver){threadObserver.detach();threadObserver=null;}
       return false;
     }
+  },
+  stop(){
+    if(threadObserver){threadObserver.detach();threadObserver=null;}
+    let removed=0,failures=0;
+    for(const state of observedThreads.values()){
+      for(const id of state.slots.keys()){
+        try{state.thread.unsetHardwareBreakpoint(id);removed++;}
+        catch(_){failures++;}
+      }
+      state.pending=null;
+      state.slots.clear();
+    }
+    observedThreads.clear();
+    armed=false;
+    return {removed,failures,recorded:records.length};
   },
   snapshot(){
     return {ready,armed,callbacks,hardwareHits,fieldHits,completedHits,

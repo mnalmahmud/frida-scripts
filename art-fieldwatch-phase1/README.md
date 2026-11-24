@@ -674,3 +674,15 @@ alone cannot safely disambiguate multiple DEX files/class loaders or recover
 multiple source DEX PCs. `dexPcSource=single-candidate DEX site` makes this
 provenance explicit. Runtime code-item binding, multi-DEX and class-loader
 identity are still needed before claiming app-wide monitoring.
+
+## Runtime watcher configuration and cleanup
+
+The Frida nterp agent now accepts a required `__artwatchNterpThreadFilter`
+(string): an exact native thread name or `*` for an explicitly requested
+all-thread watch. The CI test pins `NterpFieldProbe` to avoid unrelated work.
+The agent limits concurrent watched threads to 64 and exposes `rpc.stop()`
+to detach the thread observer and remove remaining hardware breakpoints.
+The CI host calls stop before detaching. Watching all threads on a stock ART
+process is still experimental; no claim of general thread/exception coverage
+is made from the single-worker test. The DEX selector is covered by dedicated
+Node tests, including ambiguous-site and missing-selector rejection.
