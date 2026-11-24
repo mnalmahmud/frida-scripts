@@ -14,6 +14,8 @@ ROOT = Path(__file__).resolve().parents[1]
 PACKAGE = "com.example.artfieldwatch"
 ACTIVITY = PACKAGE + "/.NoTemplateLabActivity"
 ORDER = ("writeInstance", "writeStatic", "readInstance", "readStatic")
+sys.path.insert(0, str(ROOT / 'ci'))
+from dex_field_sites import verify_fixture_methods
 
 
 def verify(lines):
@@ -33,6 +35,37 @@ def verify(lines):
     return events
 
 
+def resolve_reference(catalog, events):
+    """Attach static DEX identities, not runtime-observed PCs."""
+    methods = catalog["fixtureMethods"]
+    verify_fixture_methods(methods)
+    dex_files = {d["dexId"]: d for d in catalog["dexFiles"]}
+    if len(dex_files) != len(catalog["dexFiles"]):
+        raise AssertionError("Duplicate DEX IDs")
+    by_name = {}
+    for m in methods:
+        f = m["fields"][0]
+        dex = dex_files[m["dexId"]]
+        identity = (m["methodIndex"], f["fieldIndex"], f["dexPc"])
+        matching = [x for x in dex["fieldAccesses"]
+                    if (x["methodIndex"], x["fieldIndex"], x["dexPc"]) == identity]
+        if matching != [f]:
+            raise AssertionError("Fixture method disagrees with DEX catalog")
+        if m["methodName"] in by_name:
+            raise AssertionError("Ambiguous fixture method")
+        by_name[m["methodName"]] = {
+            "dexId": m["dexId"], "dexSha256": dex["sha256"],
+            "methodIndex": m["methodIndex"], "methodClass": m["methodClass"],
+            "fieldIndex": f["fieldIndex"], "declaringClass": f["declaringClass"],
+            "fieldName": f["fieldName"], "fieldType": f["fieldType"],
+            "operation": f["operation"], "access": f["access"],
+            "dexPc": f["dexPc"], "sourceFile": f.get("sourceFile"),
+            "sourceLine": f.get("sourceLine"),
+            "provenance": "static DEX mapping of observed leaf call"
+        }
+    return [{**e, **by_name[e["method"]]} for e in events]
+
+
 def self_test():
     lines = []
     for i in range(128):
@@ -49,6 +82,32 @@ def self_test():
             pass
         else:
             raise AssertionError("Invalid leaf-call trace was accepted")
+    from dex_field_sites import FIXTURE_LEAVES
+    methods = []
+    fields = []
+    for index, (key, spec) in enumerate(FIXTURE_LEAVES.items()):
+        opcode, name, access, operation, ret = spec
+        field = {"methodIndex": index, "fieldIndex": index//2, "dexPc": 0,
+                 "declaringClass": key[0], "fieldName": name, "fieldType": "I",
+                 "operation": operation, "access": access}
+        fields.append(field)
+        methods.append({"methodClass": key[0], "methodName": key[1],
+                        "methodIndex": index, "dexId": 0,
+                        "opcodes": [opcode, ret], "fields": [field]})
+    catalog = {"fixtureMethods": methods, "dexFiles": [
+        {"dexId": 0, "sha256": "0"*64, "fieldAccesses": fields}]}
+    resolved = resolve_reference(catalog, verify(lines))
+    assert len(resolved) == 512
+    assert resolved[0]["operation"] == "write"
+    assert resolved[2]["operation"] == "read"
+    assert resolved[0]["fieldIndex"] == resolved[2]["fieldIndex"]
+    try:
+        resolve_reference({**catalog, "dexFiles": [
+            {**catalog["dexFiles"][0], "fieldAccesses": fields[:-1]}]}, verify(lines))
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError("Inconsistent DEX catalog accepted")
     print("Stock fixture oracle self-test passed")
 
 
@@ -103,6 +162,11 @@ def main():
     (out / "stock-fixture-leaf-events.json").write_text(
         json.dumps({"scope": "fixed synthetic leaf method oracle",
                     "events": events}, indent=2))
+    catalog = json.loads((out / "field-sites-release.json").read_text())
+    resolved = resolve_reference(catalog, events)
+    (out / "stock-fixture-resolved-reference.json").write_text(
+        json.dumps({"scope": "leaf-call reference, not opcode observation",
+                    "events": resolved}, indent=2))
     print("PASS: 512 successful synthetic leaf calls on stock ART (not field opcode coverage)")
 
 
