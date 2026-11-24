@@ -784,3 +784,28 @@ outside this adapter's scope.
 The two-run coverage is scoped to this synthetic workload. It is not
 an app-wide simultaneous field watch and does not cover JIT/AOT/native,
 reference fields, quickened opcodes, or other Android ART builds/ISAs.
+
+## Conservative multi-DEX runtime method binding (experimental)
+
+The packed DEX field catalog can now include multiple ordered `classes*.dex`
+files, each with its own SHA-256 identity and method index scope. The
+interceptor indexes candidate methods by DEX method index, then requires
+the **entire exact runtime instruction stream** to match one, and only
+one, packaged DEX candidate for the observed field opcode/operand/PC.
+Repeated accesses remain distinguished by exact live DEX PC. The
+per-ArtMethod cache retains both the chosen code-item base and its DEX
+candidate; it cannot silently switch DEX mappings afterward.
+
+Identical method bytes from more than one DEX are an ambiguous match;
+the agent refuses to emit a field event and increments
+`unverifiedSites`. Likewise, quickening or instruction rewriting can
+cause valid methods to be rejected. The probe does not yet read the
+actual ART DexFile ownership pointer, class-loader identity, or
+cross-APK split/install-time DEX contents. Bytecode-equivalent methods
+from a DEX outside the packaged catalog may still collide; **there is
+no assertion of general arbitrary-app attribution** until runtime
+DexFile identity is authenticated independently.
+
+The existing synthetic release fixture is still single-DEX. Multi-DEX
+selection and method-index collisions are currently static regression
+tests only; runtime execution across distinct DexFiles remains pending.

@@ -48,7 +48,7 @@ assert.equal(select(catalog,[
   {methodClass:cls,methodName:'writeA',fieldName:'a'},
   {methodClass:cls,methodName:'readA',fieldName:'a'}
 ]).count, 2);
-assert.equal(select(catalog).methods.get(10).sites.get(0).fieldName,'a');
+assert.equal(select(catalog).methods.get(10)[0].sites.get(0).fieldName,'a');
 // Identical opcode/field ID twice inside one method is not ambiguous when the
 // live instruction pointer is bound to the verified method instruction bytes.
 const repeated = [
@@ -71,7 +71,7 @@ const floatDex={...dex,fieldAccesses:[...fields,floatField],
     insnsSize:2,insnsHex:codeFor(floatField)
   }]};
 assert.equal(select({dexFiles:[floatDex]}).count,5);
-assert.equal(select({dexFiles:[floatDex]}).methods.get(14).sites.get(0).fieldType,'F');
+assert.equal(select({dexFiles:[floatDex]}).methods.get(14)[0].sites.get(0).fieldType,'F');
 const wideFields = [
   {...fields[0],methodName:'writeLong',methodIndex:21,fieldName:'long',
     fieldType:'J',valueKind:'wide',opcode:'0x5a'},
@@ -88,7 +88,21 @@ const wideDex={...dex,fieldAccesses:wideFields,
     insnsSize:2,insnsHex:codeFor(f)
   }))};
 assert.equal(selectWide({dexFiles:[wideDex]}).count,4);
-assert.equal(selectWide({dexFiles:[wideDex]}).methods.get(23).sites.get(0).fieldType,'D');
+assert.equal(selectWide({dexFiles:[wideDex]}).methods.get(23)[0].sites.get(0).fieldType,'D');
+const second = {...dex,dexId:1,sha256:'b'.repeat(64),
+  fieldAccesses:[{...fields[0],methodName:'otherMethod',
+    methodIndex:10,fieldName:'c',fieldIndex:7}],
+  fieldMethods:[{methodIndex:10,methodClass:cls,methodName:'otherMethod',
+    insnsSize:2,insnsHex:codeFor({...fields[0],fieldIndex:7})}]};
+const crossDex = select({dexFiles:[dex,second]});
+assert.equal(crossDex.count,5);
+assert.equal(crossDex.methods.get(10).length,2);
+assert.equal(crossDex.methods.get(10)[0].dexId,0);
+assert.equal(crossDex.methods.get(10)[1].dexId,1);
+assert.equal(crossDex.methods.get(10)[1].sites.get(0).fieldName,'c');
+assert.throws(()=>select({dexFiles:[second,dex]})); // Order/IDs must match.
+assert.throws(()=>select({dexFiles:[dex,{...second,sha256:'bad'}]}));
+
 assert.throws(()=>select({dexFiles:[wideDex]}));
 assert.throws(()=>selectWide({dexFiles:[floatDex]}));
 const invalidWide = {...wideDex,
@@ -96,8 +110,8 @@ const invalidWide = {...wideDex,
 assert.equal(selectWide({dexFiles:[invalidWide]}).count,3);
 const selected=select({dexFiles:[repeatedDex]});
 assert.equal(selected.count,8);
-assert.equal(selected.methods.get(20).sites.size,4);
-assert.equal(selected.methods.get(20).sites.get(4).dexPc,4);
+assert.equal(selected.methods.get(20)[0].sites.size,4);
+assert.equal(selected.methods.get(20)[0].sites.get(4).dexPc,4);
 for (const invalid of [
   {dexFiles:[dex,dex]},
   {dexFiles:[{...dex,sha256:'invalid'}]},

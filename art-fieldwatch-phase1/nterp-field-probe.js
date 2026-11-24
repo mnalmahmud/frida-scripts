@@ -83,106 +83,102 @@ function readLiveBuildId(module) {
   throw new Error('Loaded libart GNU Build ID not found');
 }
 function selectFieldSites(data, selectors) {
-  if (!data || !Array.isArray(data.dexFiles) ||
-      data.dexFiles.length !== 1 ||
-      !Array.isArray(data.dexFiles[0].fieldAccesses) ||
-      !Array.isArray(data.dexFiles[0].fieldMethods)) {
-    throw new Error('This version requires a single verified DEX file');
-  }
-  // A plain DEX method index is NOT globally unique. Cross-DEX and
-  // class-loader identity require an additional runtime discriminator.
-  const dex = data.dexFiles[0];
-  if (dex.dexId !== 0 || typeof dex.sha256 !== 'string' ||
-      !/^[0-9a-f]{64}$/i.test(dex.sha256))
-    throw new Error('Invalid DEX catalog identity');
-  const sourceMethods = new Map();
-  for (const m of dex.fieldMethods) {
-    if (!Number.isInteger(m.methodIndex) || m.methodIndex < 0 ||
-        typeof m.methodClass !== 'string' || typeof m.methodName !== 'string' ||
-        !Number.isInteger(m.insnsSize) || m.insnsSize < 1 ||
-        m.insnsSize > 65536 || typeof m.insnsHex !== 'string' ||
-        m.insnsHex.length !== m.insnsSize * 4 ||
-        !/^[0-9a-f]+$/i.test(m.insnsHex) || sourceMethods.has(m.methodIndex))
-      throw new Error('Invalid field method code item in DEX catalog');
-    sourceMethods.set(m.methodIndex, m);
-  }
-  const validSelectors = selectors === null || selectors === undefined ? null : selectors;
-  if (validSelectors !== null &&
-      (!Array.isArray(validSelectors) || validSelectors.length === 0 ||
-       validSelectors.some(s => !s || typeof s !== 'object' ||
-         typeof s.methodClass !== 'string' ||
+  if (!data || !Array.isArray(data.dexFiles) || data.dexFiles.length === 0)
+    throw new Error('Missing packaged DEX catalog');
+  const wanted = selectors == null ? null : selectors;
+  if (wanted !== null &&
+      (!Array.isArray(wanted) || wanted.length === 0 ||
+       wanted.some(s => !s || typeof s.methodClass !== 'string' ||
          typeof s.methodName !== 'string' ||
-         typeof s.fieldName !== 'string'))) {
-    throw new Error('Expected an array of exact methodClass/methodName/fieldName selectors');
-  }
-  const wanted = validSelectors === null ? null :
-    new Set(validSelectors.map(s =>
-      [s.methodClass, s.methodName, s.fieldName].join('\0')));
+         typeof s.fieldName !== 'string')))
+    throw new Error('Expected methodClass/methodName/fieldName selectors');
+  const identities = wanted === null ? null :
+    new Set(wanted.map(s => [s.methodClass,s.methodName,s.fieldName].join('\0')));
   const matched = new Set();
+  // A method index is only unique INSIDE its DexFile. Each index maps to
+  // candidate methods in different DEXs. Runtime byte validation must select
+  // exactly one candidate, otherwise no event is published.
   const methods = new Map();
   let count = 0;
-  for (const field of dex.fieldAccesses) {
-    const opcode = Number.parseInt(field.opcode, 16);
-    if (!fieldOps.has(opcode) ||
-        (opcodeGroup === 'wide64'
-          ? field.valueKind !== 'wide' || !['J', 'D'].includes(field.fieldType)
-          : field.valueKind !== 'int' || !['I', 'F'].includes(field.fieldType)))
-      continue;
-    const identity = [field.methodClass, field.methodName, field.fieldName].join('\0');
-    if (wanted !== null && !wanted.has(identity)) continue;
-    if (!Number.isInteger(field.methodIndex) || field.methodIndex < 0 ||
-        !Number.isInteger(field.fieldIndex) || field.fieldIndex < 0 ||
-        !Number.isInteger(field.dexPc) || field.dexPc < 0 ||
-        typeof field.methodClass !== 'string' ||
-        typeof field.methodName !== 'string' ||
-        typeof field.declaringClass !== 'string') {
-      throw new Error('Invalid DEX field site metadata');
+  for (let dexIndex = 0; dexIndex < data.dexFiles.length; dexIndex++) {
+    const dex = data.dexFiles[dexIndex];
+    if (!dex || dex.dexId !== dexIndex || typeof dex.sha256 !== 'string' ||
+        !/^[0-9a-f]{64}$/i.test(dex.sha256) ||
+        !Array.isArray(dex.fieldMethods) ||
+        !Array.isArray(dex.fieldAccesses))
+      throw new Error('Invalid ordered DEX catalog identity');
+    const sources = new Map();
+    for (const m of dex.fieldMethods) {
+      if (!Number.isInteger(m.methodIndex) || m.methodIndex < 0 ||
+          typeof m.methodClass !== 'string' || typeof m.methodName !== 'string' ||
+          !Number.isInteger(m.insnsSize) || m.insnsSize < 1 ||
+          m.insnsSize > 65536 || typeof m.insnsHex !== 'string' ||
+          m.insnsHex.length !== m.insnsSize * 4 ||
+          !/^[0-9a-f]+$/i.test(m.insnsHex) || sources.has(m.methodIndex))
+        throw new Error('Invalid per-DEX method instruction stream');
+      sources.set(m.methodIndex, m);
     }
-    const kind = readOps.has(opcode) ? 1 : 2;
-    if (field.operation !== (kind === 1 ? 'read' : 'write') ||
-        field.access !== (opcode < 0x60 ? 'instance' : 'static'))
-      throw new Error('Field opcode semantics disagree with catalog');
-    if (wanted !== null) matched.add(identity);
-    let method = methods.get(field.methodIndex);
-    if (method === undefined) {
-      const source = sourceMethods.get(field.methodIndex);
-      if (!source || source.methodClass !== field.methodClass ||
-          source.methodName !== field.methodName)
-        throw new Error('Missing exact DEX method code for field');
-      const codeBytes = new Uint8Array(source.insnsSize * 2);
-      for (let i = 0; i < codeBytes.length; i++)
-        codeBytes[i] = Number.parseInt(source.insnsHex.slice(2*i, 2*i+2),16);
-      method = {methodClass:field.methodClass,
-        methodName:field.methodName,sites:new Map(),codeBytes};
-      methods.set(field.methodIndex,method);
-    } else if (method.methodClass !== field.methodClass ||
-               method.methodName !== field.methodName) {
-      throw new Error('DEX method ID collision');
+    for (const field of dex.fieldAccesses) {
+      const opcode = Number.parseInt(field.opcode,16);
+      if (!fieldOps.has(opcode) ||
+          (opcodeGroup === 'wide64'
+            ? field.valueKind !== 'wide' || !['J','D'].includes(field.fieldType)
+            : field.valueKind !== 'int' || !['I','F'].includes(field.fieldType)))
+        continue;
+      const identity=[field.methodClass,field.methodName,field.fieldName].join('\0');
+      if (identities !== null && !identities.has(identity)) continue;
+      if (!Number.isInteger(field.methodIndex) || field.methodIndex < 0 ||
+          !Number.isInteger(field.fieldIndex) || field.fieldIndex < 0 ||
+          !Number.isInteger(field.dexPc) || field.dexPc < 0 ||
+          typeof field.methodClass !== 'string' ||
+          typeof field.methodName !== 'string' ||
+          typeof field.declaringClass !== 'string' ||
+          typeof field.fieldName !== 'string')
+        throw new Error('Invalid DEX field site');
+      const kind = readOps.has(opcode) ? 1 : 2;
+      if (field.operation !== (kind === 1 ? 'read' : 'write') ||
+          field.access !== (opcode < 0x60 ? 'instance' : 'static'))
+        throw new Error('Field opcode metadata disagrees with DEX semantics');
+      const src=sources.get(field.methodIndex);
+      if (!src || src.methodClass !== field.methodClass ||
+          src.methodName !== field.methodName)
+        throw new Error('Missing method instruction stream for field');
+      let group=methods.get(field.methodIndex);
+      if (!group) { group=[];methods.set(field.methodIndex,group); }
+      let method=group.find(m=>m.dexId===dex.dexId);
+      if (!method) {
+        const codeBytes=new Uint8Array(src.insnsSize*2);
+        for (let i=0;i<codeBytes.length;i++)
+          codeBytes[i]=Number.parseInt(src.insnsHex.slice(2*i,2*i+2),16);
+        method={methodIndex:field.methodIndex,dexId:dex.dexId,
+          dexSha256:dex.sha256,methodClass:field.methodClass,
+          methodName:field.methodName,codeBytes,sites:new Map()};
+        group.push(method);
+      }
+      const p=field.dexPc*2;
+      if (p+4>method.codeBytes.length ||
+          method.codeBytes[p]!==opcode ||
+          (method.codeBytes[p+2] | (method.codeBytes[p+3]<<8))!==field.fieldIndex ||
+          method.sites.has(field.dexPc))
+        throw new Error('DEX opcode site disagrees with exact method bytes');
+      method.sites.set(field.dexPc,{
+        name:field.methodName,methodClass:field.methodClass,
+        declaringClass:field.declaringClass,fieldName:field.fieldName,
+        fieldType:field.fieldType,opcode,kind,fieldId:field.fieldIndex,
+        methodIndex:field.methodIndex,dexPc:field.dexPc,
+        dexId:dex.dexId,dexSha256:dex.sha256,
+        sourceFile:field.sourceFile ?? null,
+        sourceLine:field.sourceLine ?? null
+      });
+      if (identities !== null) matched.add(identity);
+      count++;
     }
-    // Validate both operand field ID and opcode against the raw packaged
-    // method bytes. Sites are keyed by PC; repeated field IDs are legal.
-    const p = field.dexPc * 2;
-    if (p + 4 > method.codeBytes.length ||
-        method.codeBytes[p] !== opcode ||
-        (method.codeBytes[p+2] | (method.codeBytes[p+3] << 8)) !== field.fieldIndex ||
-        method.sites.has(field.dexPc))
-      throw new Error('Field site does not match DEX method instruction bytes');
-    method.sites.set(field.dexPc,{
-      name:field.methodName, methodClass:field.methodClass,
-      declaringClass:field.declaringClass,fieldName:field.fieldName,
-      fieldType:field.fieldType,
-      opcode,kind,fieldId:field.fieldIndex,methodIndex:field.methodIndex,
-      dexPc:field.dexPc,dexId:dex.dexId,dexSha256:dex.sha256,
-      sourceFile:field.sourceFile ?? null,sourceLine:field.sourceLine ?? null
-    });
-    count++;
   }
-  if (wanted !== null && matched.size !== wanted.size)
-    throw new Error('A requested field selector was not found in packaged DEX');
-  if (count === 0) throw new Error('No supported '+opcodeGroup+' DEX field sites selected');
-  return {methods, count};
+  if (identities !== null && matched.size !== identities.size)
+    throw new Error('Requested field selector not found in packaged DEX');
+  if (count===0) throw new Error('No supported '+opcodeGroup+' field sites selected');
+  return {methods,count};
 }
-
 function install() {
   if (!opcodes || !['scalar32','wide64'].includes(opcodeGroup))
     throw new Error('Unrecognized or missing nterp opcode group');
@@ -197,46 +193,48 @@ function install() {
   const methods = selected.methods;
   // ArtMethod address distinguishes loaded runtime methods; a DEX method index
   // alone does NOT distinguish the framework, secondary DEX, or class loaders.
-  function liveFieldSite(artMethod, instruction, method, opcode, fieldId) {
-    const candidates = Array.from(method.sites.values()).filter(s =>
-      s.opcode === opcode && s.fieldId === fieldId);
-    if (candidates.length === 0) return null;
-    const methodKey = artMethod.toString();
-    const cached = liveBases.get(methodKey);
+  function liveFieldSite(artMethod,instruction,methodGroup,opcode,fieldId) {
+    const methodKey=artMethod.toString();
+    const cached=liveBases.get(methodKey);
     if (cached) {
-      for (const site of candidates)
-        if (cached.base.add(site.dexPc * 2).equals(instruction))
+      if (!methodGroup.includes(cached.method)) return null;
+      for (const site of cached.method.sites.values()) {
+        if (site.opcode===opcode && site.fieldId===fieldId &&
+            cached.base.add(site.dexPc*2).equals(instruction))
           return site;
+      }
       return null;
     }
-    const matches = [];
-    for (const site of candidates) {
-      const start = instruction.sub(site.dexPc * 2);
-      const range = Process.findRangeByAddress(start);
-      const end = start.add(method.codeBytes.length);
-      if (!range || !range.protection.includes('r') ||
-          start.compare(range.base) < 0 ||
-          end.compare(range.base.add(range.size)) > 0) continue;
-      let actual;
-      try { actual = new Uint8Array(start.readByteArray(method.codeBytes.length)); }
-      catch (_) { continue; }
-      let equal = true;
-      for (let i = 0; i < actual.length; i++)
-        if (actual[i] !== method.codeBytes[i]) {equal = false; break;}
-      if (equal) matches.push({site,base:start});
+    const matches=[];
+    for (const method of methodGroup) {
+      for (const site of method.sites.values()) {
+        if (site.opcode!==opcode || site.fieldId!==fieldId) continue;
+        const start=instruction.sub(site.dexPc*2);
+        const range=Process.findRangeByAddress(start);
+        const end=start.add(method.codeBytes.length);
+        if (!range || !range.protection.includes('r') ||
+            start.compare(range.base)<0 ||
+            end.compare(range.base.add(range.size))>0) continue;
+        let bytes;
+        try {bytes=new Uint8Array(start.readByteArray(method.codeBytes.length));}
+        catch (_) {continue;}
+        let identical=true;
+        for (let i=0;i<bytes.length;i++)
+          if (bytes[i]!==method.codeBytes[i]) {identical=false;break;}
+        if (identical) matches.push({base:start,site,method});
+      }
     }
-    if (matches.length !== 1) {
+    if (matches.length!==1) {
       unverifiedSites++;
-      if (unverifiedSites <= 8)
-        recordDiagnostic('Unverified runtime DEX instruction base: method=' +
-          method.methodName + ' fieldId=' + fieldId +
-          ' matches=' + matches.length);
-      return null; // Never fabricate a DEX PC.
+      if (unverifiedSites<=8)
+        recordDiagnostic('Ambiguous/unverified live DEX method: index='+
+          methodGroup[0].methodIndex+' candidates='+matches.length);
+      return null; // Never ascribe a field to a guessed DEX.
     }
-    if (liveBases.size >= 4096)
-      liveBases.delete(liveBases.keys().next().value);
-    liveBases.set(methodKey,{base:matches[0].base});
-    return matches[0].site;
+    const match=matches[0];
+    if (liveBases.size>=4096) liveBases.delete(liveBases.keys().next().value);
+    liveBases.set(methodKey,{base:match.base,method:match.method});
+    return match.site;
   }
   const art = Process.findModuleByName('libart.so');
   if (!art) throw new Error('libart.so is not mapped');
@@ -321,10 +319,10 @@ function install() {
       bpIds.get(successorOpcode) : id;
     const moved=borrowedSlot===id && !destination.equals(base.add(opcode*128));
     const methodIndex=method.add(8).readU32();
-    const methodSites=methods.get(methodIndex);
+    const methodCandidates=methods.get(methodIndex);
     const high=pc.add(1).readU8(), fieldId=pc.add(2).readU16();
-    const target=methodSites &&
-      liveFieldSite(method,pc,methodSites,opcode,fieldId);
+    const target=methodCandidates &&
+      liveFieldSite(method,pc,methodCandidates,opcode,fieldId);
     let sampled=null;
     if (target && target.opcode===opcode && target.fieldId===fieldId &&
         (context.rbx.toUInt32()&255)===high) {
