@@ -20,6 +20,7 @@ let threadObserver = null;
 let hardwareHits = 0;
 let fieldHits = 0;
 let completedHits = 0;
+let firstTrapDiagnostics = 0;
 let dropped = 0;
 let callbacks = 0;
 let ready = false;
@@ -204,9 +205,18 @@ function install() {
   }
 
   function handleException(details) {
+    const tid=Process.getCurrentThreadId();
+    const state=observedThreads.get(tid);
+    if (firstTrapDiagnostics++ < 4) {
+      send({type:'artwatch-nterp-trap-diagnostic',
+        exceptionType: details.type, tid, tracked:!!state,
+        pc:details.context.pc.toString(),
+        address:details.address ? details.address.toString() : null,
+        hardwareSlots:state ? Array.from(state.slots.entries()).map(
+          ([slot,at]) => ({slot,address:at.toString()})) : []});
+    }
     if (!armed || !['breakpoint','single-step'].includes(details.type))
       return false;
-    const tid=Process.getCurrentThreadId(),state=observedThreads.get(tid);
     if (!state) return false;
     const hit=details.context.pc;
     let id=null;
