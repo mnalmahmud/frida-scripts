@@ -22,6 +22,7 @@ let threadObserver = null;
 let hardwareHits = 0;
 let fieldHits = 0;
 let completedHits = 0;
+let unverifiedSites = 0;
 let abandonedFieldAttempts = 0;
 let firstTrapDiagnostics = 0;
 let dropped = 0;
@@ -74,7 +75,8 @@ function readLiveBuildId(module) {
 function selectFieldSites(data, selectors) {
   if (!data || !Array.isArray(data.dexFiles) ||
       data.dexFiles.length !== 1 ||
-      !Array.isArray(data.dexFiles[0].fieldAccesses)) {
+      !Array.isArray(data.dexFiles[0].fieldAccesses) ||
+      !Array.isArray(data.dexFiles[0].fieldMethods)) {
     throw new Error('This version requires a single verified DEX file');
   }
   // A plain DEX method index is NOT globally unique. Cross-DEX and
@@ -83,6 +85,17 @@ function selectFieldSites(data, selectors) {
   if (dex.dexId !== 0 || typeof dex.sha256 !== 'string' ||
       !/^[0-9a-f]{64}$/i.test(dex.sha256))
     throw new Error('Invalid DEX catalog identity');
+  const sourceMethods = new Map();
+  for (const m of dex.fieldMethods) {
+    if (!Number.isInteger(m.methodIndex) || m.methodIndex < 0 ||
+        typeof m.methodClass !== 'string' || typeof m.methodName !== 'string' ||
+        !Number.isInteger(m.insnsSize) || m.insnsSize < 1 ||
+        m.insnsSize > 65536 || typeof m.insnsHex !== 'string' ||
+        m.insnsHex.length !== m.insnsSize * 4 ||
+        !/^[0-9a-f]+$/i.test(m.insnsHex) || sourceMethods.has(m.methodIndex))
+      throw new Error('Invalid field method code item in DEX catalog');
+    sourceMethods.set(m.methodIndex, m);
+  }
   const validSelectors = selectors === null || selectors === undefined ? null : selectors;
   if (validSelectors !== null &&
       (!Array.isArray(validSelectors) || validSelectors.length === 0 ||
@@ -119,21 +132,29 @@ function selectFieldSites(data, selectors) {
     if (wanted !== null) matched.add(identity);
     let method = methods.get(field.methodIndex);
     if (method === undefined) {
+      const source = sourceMethods.get(field.methodIndex);
+      if (!source || source.methodClass !== field.methodClass ||
+          source.methodName !== field.methodName)
+        throw new Error('Missing exact DEX method code for field');
+      const codeBytes = new Uint8Array(source.insnsSize * 2);
+      for (let i = 0; i < codeBytes.length; i++)
+        codeBytes[i] = Number.parseInt(source.insnsHex.slice(2*i, 2*i+2),16);
       method = {methodClass:field.methodClass,
-        methodName:field.methodName,sites:new Map()};
+        methodName:field.methodName,sites:new Map(),codeBytes};
       methods.set(field.methodIndex,method);
     } else if (method.methodClass !== field.methodClass ||
                method.methodName !== field.methodName) {
       throw new Error('DEX method ID collision');
     }
-    // Repeated accesses to the same field and opcode in one method have
-    // different DEX PCs. We cannot assign them correctly until the live
-    // instruction PC is bound to the DEX code-item base: reject rather
-    // than fabricate the caller or DEX PC.
-    const key = opcode + ':' + field.fieldIndex;
-    if (method.sites.has(key))
-      throw new Error('Ambiguous repeated field site at DEX method '+field.methodIndex);
-    method.sites.set(key,{
+    // Validate both operand field ID and opcode against the raw packaged
+    // method bytes. Sites are keyed by PC; repeated field IDs are legal.
+    const p = field.dexPc * 2;
+    if (p + 4 > method.codeBytes.length ||
+        method.codeBytes[p] !== opcode ||
+        (method.codeBytes[p+2] | (method.codeBytes[p+3] << 8)) !== field.fieldIndex ||
+        method.sites.has(field.dexPc))
+      throw new Error('Field site does not match DEX method instruction bytes');
+    method.sites.set(field.dexPc,{
       name:field.methodName, methodClass:field.methodClass,
       declaringClass:field.declaringClass,fieldName:field.fieldName,
       opcode,kind,fieldId:field.fieldIndex,methodIndex:field.methodIndex,
@@ -158,6 +179,51 @@ function install() {
     throw new Error('Provide an exact thread name or * to watch all threads');
   const selected = selectFieldSites(catalog,selectors);
   const methods = selected.methods;
+  // ArtMethod address distinguishes loaded runtime methods; a DEX method index
+  // alone does NOT distinguish the framework, secondary DEX, or class loaders.
+  const liveBases = new Map();
+
+  function liveFieldSite(artMethod, instruction, method, opcode, fieldId) {
+    const candidates = Array.from(method.sites.values()).filter(s =>
+      s.opcode === opcode && s.fieldId === fieldId);
+    if (candidates.length === 0) return null;
+    const methodKey = artMethod.toString();
+    const cached = liveBases.get(methodKey);
+    if (cached) {
+      for (const site of candidates)
+        if (cached.base.add(site.dexPc * 2).equals(instruction))
+          return site;
+      return null;
+    }
+    const matches = [];
+    for (const site of candidates) {
+      const start = instruction.sub(site.dexPc * 2);
+      const range = Process.findRangeByAddress(start);
+      const end = start.add(method.codeBytes.length);
+      if (!range || !range.protection.includes('r') ||
+          start.compare(range.base) < 0 ||
+          end.compare(range.base.add(range.size)) > 0) continue;
+      let actual;
+      try { actual = new Uint8Array(start.readByteArray(method.codeBytes.length)); }
+      catch (_) { continue; }
+      let equal = true;
+      for (let i = 0; i < actual.length; i++)
+        if (actual[i] !== method.codeBytes[i]) {equal = false; break;}
+      if (equal) matches.push({site,base:start});
+    }
+    if (matches.length !== 1) {
+      unverifiedSites++;
+      if (unverifiedSites <= 8)
+        recordDiagnostic('Unverified runtime DEX instruction base: method=' +
+          method.methodName + ' fieldId=' + fieldId +
+          ' matches=' + matches.length);
+      return null; // Never fabricate a DEX PC.
+    }
+    if (liveBases.size >= 4096)
+      liveBases.delete(liveBases.keys().next().value);
+    liveBases.set(methodKey,{base:matches[0].base});
+    return matches[0].site;
+  }
   const art = Process.findModuleByName('libart.so');
   if (!art) throw new Error('libart.so is not mapped');
   const buildId = readLiveBuildId(art);
@@ -230,7 +296,8 @@ function install() {
     const methodIndex=method.add(8).readU32();
     const methodSites=methods.get(methodIndex);
     const high=pc.add(1).readU8(), fieldId=pc.add(2).readU16();
-    const target=methodSites && methodSites.sites.get(opcode + ':' + fieldId);
+    const target=methodSites &&
+      liveFieldSite(method,pc,methodSites,opcode,fieldId);
     let sampled=null;
     if (target && target.opcode===opcode && target.fieldId===fieldId &&
         (context.rbx.toUInt32()&255)===high) {
@@ -268,7 +335,8 @@ function install() {
       fieldName:f.fieldName,fieldType:'I',
       dexId:f.dexId,dexSha256:f.dexSha256,
       methodIndex:f.methodIndex,fieldIndex:f.fieldId,dexPc:f.dexPc,
-      dexPcSource:'single-candidate DEX site',
+      dexPcSource:'live instruction base verified against packaged DEX bytes',
+      runtimeMethodAddress:p.method.toString(),
       sourceFile:f.sourceFile,sourceLine:f.sourceLine,
       opcode:f.opcode,kind:f.kind,value,instructionAddress:f.pc,
       provenance:'nterp hardware breakpoint and succeeding opcode'});
@@ -391,6 +459,7 @@ rpc.exports={
   },
   snapshot(){
     return {ready,armed,callbacks,hardwareHits,fieldHits,completedHits,
+      unverifiedSites,verifiedRuntimeMethods:liveBases.size,
       watchedThreads:Array.from(observedThreads.keys()),abandonedFieldAttempts,
       events:records.slice(),
       dropped,errors:diagnostics.slice(),
