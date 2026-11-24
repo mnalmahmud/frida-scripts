@@ -12,7 +12,6 @@ import threading
 import time
 from pathlib import Path
 
-import frida
 
 BASE = Path(__file__).resolve().parents[1]
 PKG = "com.example.artfieldwatch"
@@ -88,6 +87,7 @@ def main():
     source = ("globalThis.__artwatchNterpProfile=" + json.dumps(profile) + ";\n" +
               "globalThis.__artwatchNterpCatalog=" + json.dumps(catalog) + ";\n" +
               (BASE / "nterp-field-probe.js").read_text())
+    import frida
     device = frida.get_usb_device(timeout=30)
     joined, results, errors, events = [], {}, [], []
     have_agent = threading.Event()
