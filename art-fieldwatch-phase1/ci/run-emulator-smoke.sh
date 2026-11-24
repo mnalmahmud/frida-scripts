@@ -82,5 +82,9 @@ fi
 # Experimental *instruction-level* nterp backend on unmodified ART.
 # A separate process avoids previous JIT warmup / method-hook interference.
 if [[ "$variant" == release && "${ARTWATCH_SHADOW_SHIM:-0}" == 1 ]]; then
-  python3 art-fieldwatch-phase1/ci/run-nterp-smoke.py
+  ARTWATCH_NTERP_GROUP=scalar32 python3 art-fieldwatch-phase1/ci/run-nterp-smoke.py
+  # The first run leaves an idle isolated Activity process; force a fresh
+  # process for the wide64 family, so Frida spawn gating sees its creation.
+  adb shell am force-stop com.example.artfieldwatch
+  ARTWATCH_NTERP_GROUP=wide64 python3 art-fieldwatch-phase1/ci/run-nterp-smoke.py
 fi

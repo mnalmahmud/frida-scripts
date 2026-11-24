@@ -5,6 +5,8 @@ public final class NoTemplateTarget {
   private int value;
   private int other;
   private float floating;
+  private long large;
+  private double precise;
 
   public static void writeInstance(NoTemplateTarget receiver, int x) {
     receiver.value = x;
@@ -20,6 +22,22 @@ public final class NoTemplateTarget {
 
   public static float readInstanceFloat(NoTemplateTarget receiver) {
     return receiver.floating;
+  }
+
+  public static void writeInstanceLong(NoTemplateTarget receiver, long value) {
+    receiver.large = value;
+  }
+
+  public static long readInstanceLong(NoTemplateTarget receiver) {
+    return receiver.large;
+  }
+
+  public static void writeInstanceDouble(NoTemplateTarget receiver, double value) {
+    receiver.precise = value;
+  }
+
+  public static double readInstanceDouble(NoTemplateTarget receiver) {
+    return receiver.precise;
   }
 
   // Non-leaf DEX method: 2 field writes and 2 reads with intervening
@@ -71,6 +89,24 @@ public final class NoTemplateTarget {
       if (Float.floatToRawIntBits(readInstanceFloat(receiver)) != floatBits ||
           Float.floatToRawIntBits(NoTemplateStaticState.readStaticFloat()) != staticFloatBits)
         throw new AssertionError("Raw float field payload mismatch at " + i);
+      // 64-bit fields use iget-wide/iput-wide/sget-wide/sput-wide.
+      // Mix the high and low halves of long values independently.
+      long instanceLong = 0x8123456789abcdefL ^ (i * 0x100000001L);
+      long staticLong = 0xfedcba9876543210L - i * 0x0102030405060708L;
+      writeInstanceLong(receiver, instanceLong);
+      NoTemplateStaticState.writeStaticLong(staticLong);
+      if (readInstanceLong(receiver) != instanceLong ||
+          NoTemplateStaticState.readStaticLong() != staticLong)
+        throw new AssertionError("Long field mismatch at " + i);
+      long doubleBits = (i & 1) == 0
+          ? 0x8000000000000000L : 0x7ff8000000001234L;
+      long staticDoubleBits = (i & 1) == 0
+          ? 0x0000000000000001L : 0xfff0000000000000L;
+      writeInstanceDouble(receiver, Double.longBitsToDouble(doubleBits));
+      NoTemplateStaticState.writeStaticDouble(Double.longBitsToDouble(staticDoubleBits));
+      if (Double.doubleToRawLongBits(readInstanceDouble(receiver)) != doubleBits ||
+          Double.doubleToRawLongBits(NoTemplateStaticState.readStaticDouble()) != staticDoubleBits)
+        throw new AssertionError("Double field raw bits mismatch at " + i);
       checksum += observedInstance + observedStatic;
     }
     int failed = 0;
@@ -89,8 +125,14 @@ public final class NoTemplateTarget {
 final class NoTemplateStaticState {
   private static int shared;
   private static float floating;
+  private static long sharedLong;
+  private static double sharedDouble;
   static void writeStatic(int x) { shared = x; }
   static int readStatic() { return shared; }
   static void writeStaticFloat(float value) { floating = value; }
   static float readStaticFloat() { return floating; }
+  static void writeStaticLong(long value) { sharedLong = value; }
+  static long readStaticLong() { return sharedLong; }
+  static void writeStaticDouble(double value) { sharedDouble = value; }
+  static double readStaticDouble() { return sharedDouble; }
 }

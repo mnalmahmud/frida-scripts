@@ -24,6 +24,25 @@ FLOAT_ORDER = ("writeInstanceFloat", "writeStaticFloat",
                "readInstanceFloat", "readStaticFloat")
 FLOAT_OPCODE = {"writeInstanceFloat": 0x59, "readInstanceFloat": 0x52,
                 "writeStaticFloat": 0x67, "readStaticFloat": 0x60}
+WIDE_ORDER = ("writeInstanceLong", "writeStaticLong",
+              "readInstanceLong", "readStaticLong",
+              "writeInstanceDouble", "writeStaticDouble",
+              "readInstanceDouble", "readStaticDouble")
+WIDE_OPCODE = {"writeInstanceLong": 0x5a, "writeStaticLong": 0x68,
+               "readInstanceLong": 0x53, "readStaticLong": 0x61,
+               "writeInstanceDouble": 0x5a, "writeStaticDouble": 0x68,
+               "readInstanceDouble": 0x53, "readStaticDouble": 0x61}
+WIDE_FIELDS = {
+    "writeInstanceLong": ("J", "large"),
+    "readInstanceLong": ("J", "large"),
+    "writeStaticLong": ("J", "sharedLong"),
+    "readStaticLong": ("J", "sharedLong"),
+    "writeInstanceDouble": ("D", "precise"),
+    "readInstanceDouble": ("D", "precise"),
+    "writeStaticDouble": ("D", "sharedDouble"),
+    "readStaticDouble": ("D", "sharedDouble")
+}
+MASK64 = (1 << 64) - 1
 
 
 def verify(catalog, result, sequence_stride=4):
@@ -236,31 +255,178 @@ def verify_nonleaf(catalog, result):
     print("PASS: 1536 non-leaf, repeated-site and exact raw-float accesses")
 
 
+def verify_wide(catalog, result):
+    if result.get("ready") is not True or result.get("opcodeGroup") != "wide64" or (
+            result.get("errors") or result.get("dropped") or
+            result.get("unverifiedSites") or result.get("pending")):
+        raise AssertionError("Wide nterp backend did not complete cleanly")
+    if len(catalog["dexFiles"]) != 1:
+        raise AssertionError("Wide probe requires one verified DEX")
+    dex = catalog["dexFiles"][0]
+    sites = {}
+    for name in WIDE_ORDER:
+        candidates = [f for f in dex["fieldAccesses"]
+                      if f["methodName"] == name and
+                      f["methodClass"].startswith("Lcom/example/artfieldwatch/")]
+        if len(candidates) != 1:
+            raise AssertionError(f"Expected one packaged wide field site in {name}")
+        site = candidates[0]
+        desc, field_name = WIDE_FIELDS[name]
+        if (site["fieldType"] != desc or site["fieldName"] != field_name or
+                site["valueKind"] != "wide" or
+                int(site["opcode"], 16) != WIDE_OPCODE[name] or
+                site["operation"] != ("write" if name.startswith("write") else "read")):
+            raise AssertionError(f"Wrong DEX-wide identity: {site}")
+        sites[name] = site
+    events = result["events"]
+    if len(events) != 1024:
+        raise AssertionError(f"Expected 1024 real nterp wide field accesses, got {len(events)}")
+    live_methods = {}
+    for i in range(128):
+        long_instance = (0x8123456789abcdef ^ (i * 0x100000001)) & MASK64
+        long_static = (0xfedcba9876543210 - i * 0x0102030405060708) & MASK64
+        double_instance = 0x8000000000000000 if i % 2 == 0 else 0x7ff8000000001234
+        double_static = 0x0000000000000001 if i % 2 == 0 else 0xfff0000000000000
+        expected_bits = [long_instance, long_static, long_instance, long_static,
+                         double_instance, double_static, double_instance, double_static]
+        for j, name in enumerate(WIDE_ORDER):
+            e = events[8*i+j]
+            site = sites[name]
+            desc, field_name = WIDE_FIELDS[name]
+            want = {
+                "seq": 8*i+j+1,
+                "method": name, "methodClass": site["methodClass"],
+                "declaringClass": site["declaringClass"],
+                "fieldName": field_name, "fieldType": desc,
+                "valueRepresentation":
+                    "raw-u64-ieee754" if desc == "D" else "raw-u64-le",
+                "dexId": dex["dexId"], "dexSha256": dex["sha256"],
+                "methodIndex": site["methodIndex"],
+                "fieldIndex": site["fieldIndex"], "dexPc": site["dexPc"],
+                "opcode": WIDE_OPCODE[name],
+                "kind": 2 if name.startswith("write") else 1,
+                "value": f"0x{expected_bits[j]:016x}",
+                "dexPcSource": "live instruction base verified against packaged DEX bytes",
+            }
+            for key, value in want.items():
+                if e.get(key) != value:
+                    raise AssertionError(
+                        f"Wide event iteration={i} pos={j} {key}: {e.get(key)!r} != {value!r}")
+            if not e.get("runtimeMethodAddress") or not e.get("instructionAddress"):
+                raise AssertionError("Wide method/runtime instruction pointer missing")
+            base = int(e["instructionAddress"],16) - 2*e["dexPc"]
+            identity = (e["dexSha256"],e["dexId"],e["methodIndex"])
+            matched = (e["runtimeMethodAddress"],base)
+            old = live_methods.setdefault(identity, matched)
+            if old != matched:
+                raise AssertionError(f"Wide method runtime binding changed: {identity}")
+    if result.get("verifiedRuntimeMethods") != len(live_methods):
+        raise AssertionError("Wide runtime method binding count mismatch")
+    if result.get("fieldHits") != 1024 or result.get("completedHits") != 1024:
+        raise AssertionError("Not every wide field operation completed")
+    print("PASS: 1024 stock ART nterp wide-field accesses, exact 64-bit long/double bits")
+
+
+def wide_self_test():
+    dex = {"dexId":0,"sha256":"f"*64,"fieldAccesses":[]}
+    for j,name in enumerate(WIDE_ORDER):
+        desc,field_name=WIDE_FIELDS[name]
+        owner=("Lcom/example/artfieldwatch/NoTemplateTarget;"
+               if "Instance" in name else
+               "Lcom/example/artfieldwatch/NoTemplateStaticState;")
+        dex["fieldAccesses"].append({
+            "methodName":name,"methodClass":owner,"declaringClass":owner,
+            "fieldName":field_name,"fieldType":desc,"valueKind":"wide",
+            "methodIndex":100+j,"fieldIndex":10+j,"dexPc":0,
+            "opcode":f"0x{WIDE_OPCODE[name]:02x}",
+            "operation":"write" if name.startswith("write") else "read"
+        })
+    catalog={"dexFiles":[dex]}
+    events=[]
+    for i in range(128):
+        values=[
+            (0x8123456789abcdef ^ (i * 0x100000001)) & MASK64,
+            (0xfedcba9876543210-i*0x0102030405060708)&MASK64,
+            (0x8123456789abcdef ^ (i * 0x100000001)) & MASK64,
+            (0xfedcba9876543210-i*0x0102030405060708)&MASK64,
+            0x8000000000000000 if i%2==0 else 0x7ff8000000001234,
+            0x0000000000000001 if i%2==0 else 0xfff0000000000000,
+            0x8000000000000000 if i%2==0 else 0x7ff8000000001234,
+            0x0000000000000001 if i%2==0 else 0xfff0000000000000
+        ]
+        for j,name in enumerate(WIDE_ORDER):
+            site=dex["fieldAccesses"][j]
+            events.append({
+                "seq":8*i+j+1,"method":name,
+                "methodClass":site["methodClass"],
+                "declaringClass":site["declaringClass"],
+                "fieldName":site["fieldName"],"fieldType":site["fieldType"],
+                "valueRepresentation":("raw-u64-ieee754" if
+                    site["fieldType"]=="D" else "raw-u64-le"),
+                "dexId":0,"dexSha256":dex["sha256"],
+                "methodIndex":site["methodIndex"],
+                "fieldIndex":site["fieldIndex"],"dexPc":0,
+                "opcode":WIDE_OPCODE[name],
+                "kind":2 if name.startswith("write") else 1,
+                "value":f"0x{values[j]:016x}",
+                "dexPcSource":"live instruction base verified against packaged DEX bytes",
+                "runtimeMethodAddress":f"0x{0x1000+j*16:x}",
+                "instructionAddress":f"0x{0x2000+j*16:x}"
+            })
+    result={"ready":True,"opcodeGroup":"wide64","events":events,
+            "errors":[],"dropped":0,"unverifiedSites":0,
+            "pending":0,"fieldHits":1024,"completedHits":1024,
+            "verifiedRuntimeMethods":8}
+    verify_wide(catalog,result)
+    for incorrect in (
+        {**result, "events":[{**events[0],"value":"0x1"},*events[1:]]},
+        {**result, "events":events[:-1]},
+        {**result, "fieldHits":1023},
+        {**result, "unverifiedSites":1}
+    ):
+        try: verify_wide(catalog,incorrect)
+        except AssertionError: pass
+        else: raise AssertionError("Corrupted wide event trace accepted")
+    print("nterp wide-field verifier self-test passed")
+
 
 def main():
     if os.environ.get("ARTWATCH_BUILD_VARIANT") != "release":
         raise RuntimeError("Only the non-debuggable release APK is supported")
+    opcode_group = os.environ.get("ARTWATCH_NTERP_GROUP", "scalar32")
+    if opcode_group not in ("scalar32", "wide64"):
+        raise RuntimeError("Unsupported ARTWATCH_NTERP_GROUP")
     out = Path(os.environ.get("ARTWATCH_LOG_DIR", "/tmp/artwatch-logs"))
     profile = json.loads((out / "nterp-profile.json").read_text())
     catalog = json.loads((out / "field-sites-release.json").read_text())
     # Explicit selection is test-only. The probe itself consumes arbitrary
     # exact field-site selectors from a packaged single-DEX catalog.
-    selected = [{"methodClass": m["methodClass"],
-                 "methodName": m["methodName"],
-                 "fieldName": m["fields"][0]["fieldName"]}
-                for m in catalog["fixtureMethods"]]
-    selected.extend({"methodClass":"Lcom/example/artfieldwatch/NoTemplateTarget;",
-                     "methodName":"complexStep","fieldName":name}
-                    for name in ("value","other"))
-    selected.append({"methodClass":"Lcom/example/artfieldwatch/NoTemplateTarget;",
-                     "methodName":"repeatedStep","fieldName":"value"})
-    selected.extend({
-        "methodClass": ("Lcom/example/artfieldwatch/NoTemplateTarget;"
-                        if "Instance" in name else
-                        "Lcom/example/artfieldwatch/NoTemplateStaticState;"),
-        "methodName": name, "fieldName": "floating"
-    } for name in FLOAT_ORDER)
-    source = ("globalThis.__artwatchNterpThreadFilter=" +
+    if opcode_group == "wide64":
+        selected = [{
+            "methodClass": ("Lcom/example/artfieldwatch/NoTemplateTarget;"
+                            if "Instance" in name else
+                            "Lcom/example/artfieldwatch/NoTemplateStaticState;"),
+            "methodName": name, "fieldName": WIDE_FIELDS[name][1]
+        } for name in WIDE_ORDER]
+    else:
+        selected = [{"methodClass": m["methodClass"],
+                     "methodName": m["methodName"],
+                     "fieldName": m["fields"][0]["fieldName"]}
+                    for m in catalog["fixtureMethods"]]
+        selected.extend({"methodClass":"Lcom/example/artfieldwatch/NoTemplateTarget;",
+                         "methodName":"complexStep","fieldName":name}
+                        for name in ("value","other"))
+        selected.append({"methodClass":"Lcom/example/artfieldwatch/NoTemplateTarget;",
+                         "methodName":"repeatedStep","fieldName":"value"})
+        selected.extend({
+            "methodClass": ("Lcom/example/artfieldwatch/NoTemplateTarget;"
+                            if "Instance" in name else
+                            "Lcom/example/artfieldwatch/NoTemplateStaticState;"),
+            "methodName": name, "fieldName": "floating"
+        } for name in FLOAT_ORDER)
+    source = ("globalThis.__artwatchNterpOpcodeGroup=" +
+              json.dumps(opcode_group) + ";\n" +
+              "globalThis.__artwatchNterpThreadFilter=" +
               json.dumps("NterpFieldProbe") + ";\n" +
               "globalThis.__artwatchNterpSelectors=" + json.dumps(selected) + ";\n" +
               "globalThis.__artwatchNterpProfile=" + json.dumps(profile) + ";\n" +
@@ -365,17 +531,22 @@ def main():
         if not done:
             raise AssertionError("Synthetic field workload did not finish")
         snapshot = results["script"].exports_sync.snapshot()
-        (out / "nterp-runtime-events.json").write_text(json.dumps(snapshot, indent=2))
-        (out / "nterp-probe-messages.json").write_text(json.dumps(events, indent=2))
-        leaf_only = {**snapshot, "events": [
-            e for e in snapshot["events"] if e.get("method") in ORDER]}
-        verify(catalog, leaf_only, sequence_stride=16)
-        verify_nonleaf(catalog, snapshot)
-        if snapshot.get("fieldHits") != 2050 or (
-                snapshot.get("completedHits") != 2048):
-            raise AssertionError("Expected 2050 field handler matches, "
-                                 "2048 completed field operations and "
-                                 "two failed null accesses")
+        (out / f"nterp-{opcode_group}-runtime-events.json").write_text(
+            json.dumps(snapshot, indent=2))
+        (out / f"nterp-{opcode_group}-probe-messages.json").write_text(
+            json.dumps(events, indent=2))
+        if opcode_group == "wide64":
+            verify_wide(catalog, snapshot)
+        else:
+            leaf_only = {**snapshot, "events": [
+                e for e in snapshot["events"] if e.get("method") in ORDER]}
+            verify(catalog, leaf_only, sequence_stride=16)
+            verify_nonleaf(catalog, snapshot)
+            if snapshot.get("fieldHits") != 2050 or (
+                    snapshot.get("completedHits") != 2048):
+                raise AssertionError("Expected 2050 field handler matches, "
+                                     "2048 completed field operations and "
+                                     "two failed null accesses")
     finally:
         if child.poll() is None:
             child.terminate()
@@ -392,11 +563,11 @@ def main():
             results["session"].detach()
         for worker in joined:
             worker.join(timeout=5)
-        (out / "nterp-host-trace.txt").write_text("\\n".join(trace + errors) + "\\n")
+        (out / f"nterp-{opcode_group}-host-trace.txt").write_text("\\n".join(trace + errors) + "\\n")
         try:
             log_all = subprocess.check_output(
                 ["adb", "logcat", "-d", "-t", "2500"], text=True)
-            (out / "nterp-logcat-tail.txt").write_text(log_all)
+            (out / f"nterp-{opcode_group}-logcat-tail.txt").write_text(log_all)
         except Exception as e:
             trace.append(str(e))
     if errors:
@@ -406,5 +577,6 @@ def main():
 if __name__ == "__main__":
     if sys.argv[1:] == ["--self-test"]:
         self_test()
+        wide_self_test()
     else:
         main()

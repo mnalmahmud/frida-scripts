@@ -34,6 +34,16 @@ public final class NoTemplateNterpActivity extends Activity {
       finish();
       return;
     }
+    // Ensure static wide field initialization and Double helper linkage
+    // occur before the opcode breakpoint family is armed.
+    if (NoTemplateStaticState.readStaticLong() != 0L ||
+        Double.doubleToRawLongBits(NoTemplateStaticState.readStaticDouble()) != 0L ||
+        Double.doubleToRawLongBits(Double.longBitsToDouble(0x8000000000000000L))
+          != 0x8000000000000000L) {
+      Log.e("ARTWATCH_NTERP_LAB", "NTERP_LAB_FAILED wide initialization");
+      finish();
+      return;
+    }
     // Frida attaches/validates ART before the second launch starts measurement.
     Log.i("ARTWATCH_NTERP_LAB", "NTERP_LAB_IDLE");
   }

@@ -754,3 +754,33 @@ This is deliberately **not** an implementation of `iget-wide`/`sget-wide`
 (`J`/`D`), object references, narrower primitive opcodes, quickened
 field operations, native JNI field writes, switch interpreter or compiled
 field instructions. Those need separate opcode and data layout handling.
+
+## Wide64 nterp field-opcode family (2026-11-25)
+
+The stock ART API33 x86_64 breakpoint adapter now supports a selectable
+`__artwatchNterpOpcodeGroup`: `scalar32` (0x52/0x59/0x60/0x67) or
+`wide64` (0x53/0x5a/0x61/0x68). These are **separate measurement
+passes**, not simultaneous complete field coverage. Only four hardware
+execution breakpoints are allocated on the selected worker thread.
+
+Wide DEX field descriptors `J` and `D` are read as the consecutive pair
+of 32-bit virtual-register slots in the pinned x86_64 nterp shadow frame.
+The agent emits a lossless 16-digit hexadecimal string, `0x...`,
+including leading zeroes; `J` uses `raw-u64-le` provenance (raw bits
+assembled from two little-endian 32-bit words) and `D` uses
+`raw-u64-ieee754`. JavaScript `Number` and floating-point conversion
+are never used to transport these values.
+
+The non-debuggable release APK exercises instance/static field writes
+and reads for `long` and `double`, including changing high and low
+halves, negative zero, subnormal doubles, infinity, and a noncanonical
+NaN payload. A dedicated second run starts a **fresh isolated process**
+after the scalar32 pass. It checks 1,024 actual wide field accesses,
+DEX PC and ArtMethod identity, correct opcode/field descriptors, and exact
+64-bit read/write payloads. Unknown ART builds, nonmatching packaged
+DEX method bytes, and other field opcodes still fail closed or are
+outside this adapter's scope.
+
+The two-run coverage is scoped to this synthetic workload. It is not
+an app-wide simultaneous field watch and does not cover JIT/AOT/native,
+reference fields, quickened opcodes, or other Android ART builds/ISAs.

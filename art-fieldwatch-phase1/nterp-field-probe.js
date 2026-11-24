@@ -1,7 +1,7 @@
 'use strict';
 
 // Actual stock ART nterp opcode entry instrumentation, not Java method hooks.
-// Initial profile: Android 13 API33 x86_64, exact ELF Build ID, 32-bit ints.
+// Pinned profile: Android 13 API33 x86_64, exact ELF Build ID, 32-bit and 64-bit fields.
 // It observes only executing nterp code. JIT/AOT/switch are NOT covered.
 //
 // x86_64 ART nterp ABI: r12=DEX instruction pointer, r13=4-byte vreg base,
@@ -13,6 +13,14 @@ const profile = globalThis.__artwatchNterpProfile;
 const catalog = globalThis.__artwatchNterpCatalog;
 const selectors = globalThis.__artwatchNterpSelectors;
 const threadFilter = globalThis.__artwatchNterpThreadFilter;
+const opcodeGroup = globalThis.__artwatchNterpOpcodeGroup ?? 'scalar32';
+// x86_64 has four hardware execution slots. Subscribe to ONE opcode family
+// per run, without pretending a partial family provides app-wide coverage.
+const opcodeGroups = Object.freeze({
+  scalar32: Object.freeze([0x52, 0x59, 0x60, 0x67]),
+  wide64: Object.freeze([0x53, 0x5a, 0x61, 0x68])
+});
+const opcodes = opcodeGroups[opcodeGroup];
 const MAX_RECORDS = 4096;
 const active = new Map();
 const records = [];
@@ -31,8 +39,8 @@ let dropped = 0;
 let callbacks = 0;
 let ready = false;
 let armed = false;
-const fieldOps = new Set([0x52, 0x59, 0x60, 0x67]);
-const continuationOps = [0x0e, 0x0f];
+const fieldOps = new Set(opcodes || []);
+const readOps = new Set([0x52, 0x53, 0x60, 0x61]);
 // The first continuation after a field access may be a move, nop, or return.
 // A larger watcher must subscribe to every opcode or a shared dispatch edge.
 
@@ -115,8 +123,11 @@ function selectFieldSites(data, selectors) {
   let count = 0;
   for (const field of dex.fieldAccesses) {
     const opcode = Number.parseInt(field.opcode, 16);
-    if (!fieldOps.has(opcode) || field.valueKind !== 'int' ||
-        !['I','F'].includes(field.fieldType)) continue;
+    if (!fieldOps.has(opcode) ||
+        (opcodeGroup === 'wide64'
+          ? field.valueKind !== 'wide' || !['J', 'D'].includes(field.fieldType)
+          : field.valueKind !== 'int' || !['I', 'F'].includes(field.fieldType)))
+      continue;
     const identity = [field.methodClass, field.methodName, field.fieldName].join('\0');
     if (wanted !== null && !wanted.has(identity)) continue;
     if (!Number.isInteger(field.methodIndex) || field.methodIndex < 0 ||
@@ -127,7 +138,7 @@ function selectFieldSites(data, selectors) {
         typeof field.declaringClass !== 'string') {
       throw new Error('Invalid DEX field site metadata');
     }
-    const kind = (opcode === 0x52 || opcode === 0x60) ? 1 : 2;
+    const kind = readOps.has(opcode) ? 1 : 2;
     if (field.operation !== (kind === 1 ? 'read' : 'write') ||
         field.access !== (opcode < 0x60 ? 'instance' : 'static'))
       throw new Error('Field opcode semantics disagree with catalog');
@@ -168,11 +179,13 @@ function selectFieldSites(data, selectors) {
   }
   if (wanted !== null && matched.size !== wanted.size)
     throw new Error('A requested field selector was not found in packaged DEX');
-  if (count === 0) throw new Error('No supported int DEX field sites selected');
+  if (count === 0) throw new Error('No supported '+opcodeGroup+' DEX field sites selected');
   return {methods, count};
 }
 
 function install() {
+  if (!opcodes || !['scalar32','wide64'].includes(opcodeGroup))
+    throw new Error('Unrecognized or missing nterp opcode group');
   if (!profile || profile.api !== 33 || profile.architecture !== 'x86_64' ||
       Process.arch !== 'x64' || Process.pointerSize !== 8 ||
       profile.handlerSize !== 128 || profile.opcodeCount !== 256)
@@ -237,7 +250,7 @@ function install() {
       profile.startOffset <= 0 || profile.endOffset > art.size)
     throw new Error('Invalid nterp opcode table');
   const base = art.base.add(profile.startOffset);
-  const ops = [0x52, 0x59, 0x60, 0x67]; // iget, iput, sget, sput
+  const ops = opcodes; // four slots, selected scalar32 or wide64 field family
   const bpIds = new Map(ops.map((opcode, index) => [opcode, index]));
   for (const opcode of ops) {
     const site = base.add(opcode * 128);
@@ -280,6 +293,19 @@ function install() {
     state.slots.set(id,to);
   }
 
+  // A DEX wide value occupies two consecutive 32-bit vregs in this
+  // build's x86_64 nterp shadow frame. Reconstruct raw bits without JS
+  // Number or a floating-point conversion (which may canonicalize NaNs).
+  function readVreg(fp, vreg, descriptor) {
+    const slot = fp.add(vreg * 4);
+    if (descriptor === 'J' || descriptor === 'D') {
+      const lo = slot.readU32().toString(16).padStart(8, '0');
+      const hi = slot.add(4).readU32().toString(16).padStart(8, '0');
+      return '0x' + hi + lo;
+    }
+    return descriptor === 'F' ? slot.readU32() : slot.readS32();
+  }
+
   function beginField(context,state,opcode) {
     const pc=context.r12, fp=context.r13;
     const method=context.rsp.readPointer();
@@ -305,8 +331,7 @@ function install() {
       const vreg=opcode>=0x60 ? high : high&15;
       sampled={...target, vreg,
         preValue:target.kind===2 ?
-          (target.fieldType==='F' ? fp.add(vreg*4).readU32() :
-            fp.add(vreg*4).readS32()) : null,
+          readVreg(fp,vreg,target.fieldType) : null,
         pc:pc.toString()};
       fieldHits++;
     }
@@ -328,16 +353,18 @@ function install() {
     completedHits++;
     if (!p.sampled) return;
     const f=p.sampled;
-    const value=f.kind===1
-      ? (f.fieldType==='F' ? context.r13.add(f.vreg*4).readU32() :
-          context.r13.add(f.vreg*4).readS32()) : f.preValue;
+    const value=f.kind===1 ?
+      readVreg(context.r13,f.vreg,f.fieldType) : f.preValue;
     if (records.length>=MAX_RECORDS) {dropped++;return;}
     if (records.length < 8) send({type:'artwatch-nterp-record-sample',
       number:records.length+1, method:f.name, value});
     records.push({seq:records.length+1,method:f.name,
       methodClass:f.methodClass,declaringClass:f.declaringClass,
       fieldName:f.fieldName,fieldType:f.fieldType,
-      valueRepresentation:f.fieldType==='F'?'raw-u32-ieee754':'signed-int32',
+      valueRepresentation:
+        f.fieldType==='F'?'raw-u32-ieee754':
+        f.fieldType==='D'?'raw-u64-ieee754':
+        f.fieldType==='J'?'raw-u64-le':'signed-int32',
       dexId:f.dexId,dexSha256:f.dexSha256,
       methodIndex:f.methodIndex,fieldIndex:f.fieldId,dexPc:f.dexPc,
       dexPcSource:'live instruction base verified against packaged DEX bytes',
@@ -430,7 +457,7 @@ function install() {
   ready=true;
   send({type:'artwatch-nterp-init',ready:true,mode:'hardware-breakpoint',
     buildId,candidateHandlers:ops.length,selectedFieldSites:selected.count,
-    threadFilter,
+    threadFilter,opcodeGroup,
     attachedHandlers:0,
     moduleBase:art.base.toString(),handlerTable:base.toString()});
   return armThreads;
@@ -463,7 +490,7 @@ rpc.exports={
     return {removed,failures,recorded:records.length};
   },
   snapshot(){
-    return {ready,armed,callbacks,hardwareHits,fieldHits,completedHits,
+    return {ready,armed,opcodeGroup,callbacks,hardwareHits,fieldHits,completedHits,
       unverifiedSites,verifiedRuntimeMethods:liveBases.size,
       watchedThreads:Array.from(observedThreads.keys()),abandonedFieldAttempts,
       events:records.slice(),

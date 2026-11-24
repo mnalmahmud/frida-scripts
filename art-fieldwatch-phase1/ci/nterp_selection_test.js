@@ -8,10 +8,19 @@ const file = fs.readFileSync(path.join(__dirname, '..', 'nterp-field-probe.js'),
 const begin = file.indexOf('function selectFieldSites(data, selectors) {');
 const end = file.indexOf('\nfunction install() {', begin);
 assert(begin >= 0 && end > begin, 'Cannot find actual Frida selector');
-const context = vm.createContext({});
-vm.runInContext('const fieldOps = new Set([0x52, 0x59, 0x60, 0x67]);\n' +
-  file.slice(begin, end) + '\nglobalThis.select = selectFieldSites;', context);
-const select = context.select;
+function selectForGroup(group) {
+  const ctx = vm.createContext({});
+  const ops = group === 'wide64' ? [0x53,0x5a,0x61,0x68] :
+    [0x52,0x59,0x60,0x67];
+  vm.runInContext(
+    'const opcodeGroup=' + JSON.stringify(group) + ';\n' +
+    'const fieldOps=new Set(' + JSON.stringify(ops) + ');\n' +
+    'const readOps=new Set([0x52,0x53,0x60,0x61]);\n' +
+    file.slice(begin, end) + '\nglobalThis.select=selectFieldSites;', ctx);
+  return ctx.select;
+}
+const select = selectForGroup('scalar32');
+const selectWide = selectForGroup('wide64');
 const cls = 'Lexample/Sample;';
 const mk = (methodName, methodIndex, fieldName, fieldIndex, dexPc, opcode, operation, access) => ({
   methodClass: cls, methodName, methodIndex, fieldName, fieldIndex, dexPc,
@@ -63,6 +72,28 @@ const floatDex={...dex,fieldAccesses:[...fields,floatField],
   }]};
 assert.equal(select({dexFiles:[floatDex]}).count,5);
 assert.equal(select({dexFiles:[floatDex]}).methods.get(14).sites.get(0).fieldType,'F');
+const wideFields = [
+  {...fields[0],methodName:'writeLong',methodIndex:21,fieldName:'long',
+    fieldType:'J',valueKind:'wide',opcode:'0x5a'},
+  {...fields[1],methodName:'readLong',methodIndex:22,fieldName:'long',
+    fieldType:'J',valueKind:'wide',opcode:'0x53'},
+  {...fields[2],methodName:'writeDouble',methodIndex:23,fieldName:'double',
+    fieldType:'D',valueKind:'wide',opcode:'0x68'},
+  {...fields[3],methodName:'readDouble',methodIndex:24,fieldName:'double',
+    fieldType:'D',valueKind:'wide',opcode:'0x61'}
+];
+const wideDex={...dex,fieldAccesses:wideFields,
+  fieldMethods:wideFields.map(f=>({
+    methodIndex:f.methodIndex,methodClass:f.methodClass,methodName:f.methodName,
+    insnsSize:2,insnsHex:codeFor(f)
+  }))};
+assert.equal(selectWide({dexFiles:[wideDex]}).count,4);
+assert.equal(selectWide({dexFiles:[wideDex]}).methods.get(23).sites.get(0).fieldType,'D');
+assert.throws(()=>select({dexFiles:[wideDex]}));
+assert.throws(()=>selectWide({dexFiles:[floatDex]}));
+const invalidWide = {...wideDex,
+  fieldAccesses:[{...wideFields[0],fieldType:'F'},...wideFields.slice(1)]};
+assert.equal(selectWide({dexFiles:[invalidWide]}).count,3);
 const selected=select({dexFiles:[repeatedDex]});
 assert.equal(selected.count,8);
 assert.equal(selected.methods.get(20).sites.size,4);
