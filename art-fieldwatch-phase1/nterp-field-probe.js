@@ -19,8 +19,9 @@ const hooks = [];
 let dropped = 0;
 let callbacks = 0;
 let ready = false;
+let armed = false;
 const fieldOps = new Set([0x52, 0x59, 0x60, 0x67]);
-const continuationOps = [0x00, 0x01, 0x02, 0x03, 0x0e, 0x0f, 0x10, 0x11];
+const continuationOps = [0x0e, 0x0f];
 // The first continuation after a field access may be a move, nop, or return.
 // A larger watcher must subscribe to every opcode or a shared dispatch edge.
 
@@ -112,6 +113,7 @@ function install() {
   const base = art.base.add(profile.startOffset);
   const installed = [...new Set([...fieldOps, ...continuationOps])];
   function callback(opcode, context, tid) {
+    if (!armed || (!fieldOps.has(opcode) && !active.has(tid))) return;
     callbacks++;
     const pc = context.r12, fp = context.r13;
     if (pc.isNull() || fp.isNull()) return;
@@ -170,8 +172,13 @@ function install() {
     handlerTable: base.toString()});
 }
 rpc.exports = {
+  arm() {
+    if (!ready || armed) return false;
+    armed = true;
+    return true;
+  },
   snapshot() {
-    return {ready, callbacks, events: records.slice(), dropped,
+    return {ready, armed, callbacks, events: records.slice(), dropped,
       errors: diagnostics.slice(), pending: active.size};
   }
 };

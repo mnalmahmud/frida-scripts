@@ -90,9 +90,11 @@ def main():
     import frida
     device = frida.get_usb_device(timeout=30)
     joined, results, errors, events = [], {}, [], []
+    trace = []
     have_agent = threading.Event()
 
     def on_message(message, unused):
+        trace.append(str(message)[:2000])
         if message.get("type") == "error":
             errors.append(message.get("stack") or str(message))
         else:
@@ -101,6 +103,7 @@ def main():
                 events.append(payload)
 
     def on_spawn(spawn):
+        trace.append(f"spawn-added {spawn.identifier} pid={spawn.pid}")
         if spawn.identifier != LAB_PROCESS:
             try: device.resume(spawn.pid)
             except Exception as e: errors.append(str(e))
@@ -111,10 +114,12 @@ def main():
                 script = session.create_script(source)
                 script.on("message", on_message)
                 script.load()
+                trace.append("script loaded")
                 results["pid"] = spawn.pid
                 results["session"] = session
                 results["script"] = script
                 device.resume(spawn.pid)
+                trace.append("lab process resumed")
             except Exception as e:
                 errors.append(str(e))
                 try: device.resume(spawn.pid)
@@ -135,13 +140,43 @@ def main():
             raise AssertionError("Frida never received the lab process spawn")
         if errors or "script" not in results:
             raise AssertionError(f"Failed to attach nterp probe: {errors}")
-        child.communicate(timeout=25)
-        done = False
-        deadline = time.monotonic() + 18
-        while time.monotonic() < deadline:
-            log = subprocess.check_output(
+        started_output, _ = child.communicate(timeout=25)
+        trace.append("initial am start: " + started_output[:500])
+        if child.returncode != 0:
+            raise AssertionError("Could not launch separate nterp activity")
+        def lab_log():
+            return subprocess.check_output(
                 ["adb", "logcat", "-d", "--pid=" + str(results["pid"]),
                  "-s", "ARTWATCH_NTERP_LAB:I", "*:S"], text=True)
+        deadline = time.monotonic() + 12
+        while time.monotonic() < deadline:
+            log = lab_log()
+            if "NTERP_LAB_FAILED" in log:
+                raise AssertionError("Synthetic nterp process failed during startup")
+            if "NTERP_LAB_IDLE" in log:
+                break
+            time.sleep(0.3)
+        else:
+            raise AssertionError("Separate nterp activity never became idle")
+        init = results["script"].exports_sync.snapshot()
+        trace.append("probe initialization: " + json.dumps(
+            {k:v for k,v in init.items() if k != "events"}))
+        if not init["ready"] or init["errors"]:
+            raise AssertionError("nterp probe initialization failed")
+        if results["script"].exports_sync.arm() is not True:
+            raise AssertionError("Could not arm nterp opcode recorder")
+        run_result = subprocess.run(
+            ["adb", "shell", "am", "start", "-W", "-n", ACTIVITY,
+             "--ez", "run", "true"],
+            capture_output=True, text=True, timeout=12)
+        trace.append("workload am start: " + run_result.stdout[:500] +
+                     run_result.stderr[:500])
+        if run_result.returncode != 0:
+            raise AssertionError("Could not trigger nterp workload")
+        done = False
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            log = lab_log()
             if "NTERP_LAB_FAILED" in log:
                 raise AssertionError("Synthetic field workload failed")
             if "NTERP_LAB_DONE checksum=-16768 nullChecks=2" in log:
@@ -164,6 +199,13 @@ def main():
             results["session"].detach()
         for worker in joined:
             worker.join(timeout=5)
+        (out / "nterp-host-trace.txt").write_text("\\n".join(trace + errors) + "\\n")
+        try:
+            log_all = subprocess.check_output(
+                ["adb", "logcat", "-d", "-t", "2500"], text=True)
+            (out / "nterp-logcat-tail.txt").write_text(log_all)
+        except Exception as e:
+            trace.append(str(e))
     if errors:
         raise AssertionError(f"Frida errors: {errors}")
 

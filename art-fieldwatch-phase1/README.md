@@ -625,3 +625,8 @@ nterp events with runtime instruction addresses and static DEX identities.
 Field PCs are mapped from the verified fixture catalog rather than measured
 from the method code-item base. Source-backed assumptions remain gated to
 this precise ART build; unrelated binaries must fail closed.
+
+The isolated test activity now starts idle and only executes field code
+when the host has attached and armed the opcode probe. The test hooks only the
+four actual integer field opcode slots and the two immediate return handlers,
+avoiding per-instruction overhead in unrelated move handlers during startup.
