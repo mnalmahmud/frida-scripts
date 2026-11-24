@@ -649,3 +649,12 @@ opcode handler to sample successful reads and writes. The ELF build-ID gate,
 DEX identity checks, and strict 512-event host oracle are retained.
 Hardware breakpoint availability and runtime correctness still require CI
 verification; this is not JIT/AOT or general app-wide coverage.
+
+The first hardware-breakpoint emulator run reached 511 executed field events
+before an exception-path overlap: a failed null field access skipped its
+successor, leaving its temporary breakpoint pending. The callback now restores
+that slot when the next field handler executes and discards the unsuccessful
+access. The isolated test pre-initializes the second declaring class before
+arming the recorder so the 512-event measurement does not mix its initial
+class-linking path with the steady-state nterp path. These are experimental
+correctness fixes; no JIT/AOT or exception-coverage claims are implied.

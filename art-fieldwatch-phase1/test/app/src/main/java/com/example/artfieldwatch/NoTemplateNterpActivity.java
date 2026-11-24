@@ -17,8 +17,17 @@ public final class NoTemplateNterpActivity extends Activity {
       finish();
       return;
     }
-    // Frida first attaches and validates the stock ART binary. Only an
-    // independent second start intent triggers this cold field workload.
+    // Resolve and initialize the second declaring class before the host arms
+    // nterp. The measured phase then exercises both fields through their
+    // normal hot interpreter paths, without mixing class-initialization
+    // dispatch into the 512-event test.
+    int initial = NoTemplateStaticState.readStatic();
+    if (initial != 0) {
+      Log.e("ARTWATCH_NTERP_LAB", "NTERP_LAB_FAILED unexpected initial static value");
+      finish();
+      return;
+    }
+    // Frida attaches/validates ART before the second launch starts measurement.
     Log.i("ARTWATCH_NTERP_LAB", "NTERP_LAB_IDLE");
   }
 

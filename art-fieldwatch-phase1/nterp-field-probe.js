@@ -20,6 +20,7 @@ let threadObserver = null;
 let hardwareHits = 0;
 let fieldHits = 0;
 let completedHits = 0;
+let abandonedFieldAttempts = 0;
 let firstTrapDiagnostics = 0;
 let dropped = 0;
 let callbacks = 0;
@@ -236,12 +237,22 @@ function install() {
     } // Not our hardware debug trap.
     hardwareHits++;callbacks++;
     try {
-      if (state.pending) {
-        if (state.pending.id!==id ||
-            !state.pending.destination.equals(state.slots.get(id)))
-          throw new Error('Unexpected overlapping nterp exception');
+      if (state.pending && state.pending.id===id &&
+          state.pending.destination.equals(state.slots.get(id))) {
+        // Normal nonthrowing field access reached its successor opcode.
         completeField(details.context,state);
       } else {
+        if (state.pending) {
+          // A throwing field access does NOT reach the next DEX opcode.
+          // Restore its old slot when a later field handler is encountered;
+          // the original access must never emit a successful event.
+          const stale=state.pending;
+          if (!state.slots.get(stale.id).equals(stale.destination))
+            throw new Error('Pending hardware breakpoint identity corrupted');
+          state.pending=null;
+          switchBreakpoint(state,stale.id,stale.original);
+          abandonedFieldAttempts++;
+        }
         if (!state.slots.get(id).equals(base.add(ops[id]*128)))
           throw new Error('Hardware breakpoint slot identity changed');
         beginField(details.context,state,ops[id]);
@@ -290,7 +301,8 @@ rpc.exports={
   },
   snapshot(){
     return {ready,armed,callbacks,hardwareHits,fieldHits,completedHits,
-      watchedThreads:Array.from(observedThreads.keys()),events:records.slice(),
+      watchedThreads:Array.from(observedThreads.keys()),abandonedFieldAttempts,
+      events:records.slice(),
       dropped,errors:diagnostics.slice(),
       pending:Array.from(observedThreads.values()).filter(t=>t.pending).length};
   }
