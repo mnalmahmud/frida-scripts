@@ -587,3 +587,22 @@ The release workload checks 128 iterations, signed integer results, checksum
 -16768, and separate null-read/null-write exceptions. This is a workload and
 DEX-shape oracle only; it does not record runtime events and is not evidence
 of a template-independent instrumentation backend.
+
+## Source-built ART interpreter backend (synthetic fixture only)
+
+`lab/install_fixture_backend.py` installs actual source instrumentation in a
+separate ART laboratory source tree. Its input is pinned to the Android 13
+source blob `0b91120c58b05567289a94bdd5fc4fb5765efa9e`. It does not modify an installed runtime or
+accept arbitrary field selectors. It records the four fixed synthetic leaf
+methods only, with read values taken from the original interpreter result and
+write values recorded after successful primitive store completion. Failed
+accesses and forced frame pops are not recorded. The lab uses a bounded log
+rather than the P3 recorder, and the isolated non-debuggable
+`NoTemplateLabActivity` invokes no JNI sink. Run the lab in a source-built
+Android emulator configured for the switch interpreter, with only the synthetic
+test workload, then use `lab/verify_fixture_backend.py` against the release
+APK's catalog and isolated process log. The oracle requires all 512 events in
+exact order, matching method/field IDs, DEX PCs, signed integer values, and
+both null exceptions. Stock CI runs the host self-tests only. A source build
+and actual interpreter execution have not yet been verified. This is not a
+stock-device Frida backend, JIT/AOT implementation, or app-wide coverage claim.
