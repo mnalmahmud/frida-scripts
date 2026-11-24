@@ -205,8 +205,8 @@ function install() {
 
   function switchBreakpoint(state,id,to) {
     const old=state.slots.get(id);
-    if (!old || old.equals(to))
-      throw new Error('Cannot advance debug breakpoint id='+id);
+    if (!old) throw new Error('Missing debug breakpoint id='+id);
+    if (old.equals(to)) return; // Consecutive identical field opcodes.
     state.thread.unsetHardwareBreakpoint(id);
     state.slots.delete(id);
     state.thread.setHardwareBreakpoint(id,to);
@@ -222,14 +222,18 @@ function install() {
     const nextPc=pc.add(4), successorOpcode=nextPc.readU8();
     const destination=base.add(successorOpcode*128);
     const id=bpIds.get(opcode);
+    // Borrow the already-subscribed successor handler instead of putting two
+    // hardware breakpoints at the same address.
+    const borrowedSlot=bpIds.has(successorOpcode) ?
+      bpIds.get(successorOpcode) : id;
+    const moved=borrowedSlot===id && !destination.equals(base.add(opcode*128));
     const methodIndex=method.add(8).readU32();
     const methodSites=methods.get(methodIndex);
     const high=pc.add(1).readU8(), fieldId=pc.add(2).readU16();
     const target=methodSites && methodSites.sites.get(opcode + ':' + fieldId);
     let sampled=null;
     if (target && target.opcode===opcode && target.fieldId===fieldId &&
-        (context.rbx.toUInt32()&255)===high &&
-        successorOpcode===(target.kind===1 ? 0x0f : 0x0e)) {
+        (context.rbx.toUInt32()&255)===high) {
       const vreg=opcode>=0x60 ? high : high&15;
       sampled={...target, vreg,
         preValue:target.kind===2 ? fp.add(vreg*4).readS32() : null,
@@ -239,15 +243,16 @@ function install() {
     // Hardware breakpoint is raised BEFORE opcode execution. Redirect the
     // same slot to the successor opcode; that trap occurs after the field
     // operation on the normal (nonthrowing) path. We never patch ART code.
-    switchBreakpoint(state,id,destination);
-    state.pending={id,original:base.add(opcode*128),destination,
+    if (moved) switchBreakpoint(state,id,destination);
+    state.pending={id,borrowedSlot,moved,
+      original:base.add(opcode*128),destination,
       nextPc,method,fp,sampled};
   }
 
   function completeField(context,state) {
     const p=state.pending;
     state.pending=null;
-    switchBreakpoint(state,p.id,p.original);
+    if (p.moved) switchBreakpoint(state,p.id,p.original);
     if (!context.r12.equals(p.nextPc) || !context.r13.equals(p.fp) ||
         !context.rsp.readPointer().equals(p.method)) return;
     completedHits++;
@@ -299,20 +304,26 @@ function install() {
     } // Not our hardware debug trap.
     hardwareHits++;callbacks++;
     try {
-      if (state.pending && state.pending.id===id &&
-          state.pending.destination.equals(state.slots.get(id))) {
-        // Normal nonthrowing field access reached its successor opcode.
+      const pending=state.pending;
+      const succeeded=pending && pending.borrowedSlot===id &&
+        state.slots.get(id).equals(pending.destination) &&
+        details.context.r12.equals(pending.nextPc) &&
+        details.context.r13.equals(pending.fp) &&
+        details.context.rsp.readPointer().equals(pending.method);
+      if (succeeded) {
+        // The successor may itself be another watched field instruction.
+        // Finish the previous access, then begin the new one at this trap.
         completeField(details.context,state);
+        if (bpIds.has(details.context.r12.readU8()))
+          beginField(details.context,state,ops[id]);
       } else {
-        if (state.pending) {
-          // A throwing field access does NOT reach the next DEX opcode.
-          // Restore its old slot when a later field handler is encountered;
-          // the original access must never emit a successful event.
-          const stale=state.pending;
-          if (!state.slots.get(stale.id).equals(stale.destination))
-            throw new Error('Pending hardware breakpoint identity corrupted');
+        if (pending) {
+          if (pending.moved) {
+            if (!state.slots.get(pending.id).equals(pending.destination))
+              throw new Error('Pending breakpoint identity corrupted');
+            switchBreakpoint(state,pending.id,pending.original);
+          }
           state.pending=null;
-          switchBreakpoint(state,stale.id,stale.original);
           abandonedFieldAttempts++;
         }
         if (!state.slots.get(id).equals(base.add(ops[id]*128)))

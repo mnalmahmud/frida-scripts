@@ -686,3 +686,18 @@ The CI host calls stop before detaching. Watching all threads on a stock ART
 process is still experimental; no claim of general thread/exception coverage
 is made from the single-worker test. The DEX selector is covered by dedicated
 Node tests, including ambiguous-site and missing-selector rejection.
+
+## Non-leaf field operation execution
+
+The nterp hardware-breakpoint state machine now tracks **any immediate DEX
+successor**, not only `return` and `return-void`. If the next opcode is also a
+watched field operation, it reuses that hardware breakpoint and samples the
+completed operation before beginning the next one. It handles consecutive
+same-opcode instructions without duplicate breakpoint addresses.
+
+The synthetic non-debuggable APK includes `NoTemplateTarget.complexStep`,
+which uses both `value` and `other` fields in one method, with intervening
+method calls and ordinary computations. The runtime oracle now verifies the
+original 512 leaf accesses and **512 additional non-leaf field accesses** in
+DEX order and with exact integer values. If the packaged DEX does not retain
+all four non-leaf operations, CI must reject it before claiming coverage.

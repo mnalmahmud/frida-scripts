@@ -96,6 +96,57 @@ def self_test():
     print("nterp event verifier self-test passed")
 
 
+def verify_nonleaf(catalog, result):
+    if len(catalog["dexFiles"]) != 1:
+        raise AssertionError("Non-leaf test requires single DEX")
+    dex = catalog["dexFiles"][0]
+    sites = [
+        f for f in dex["fieldAccesses"]
+        if f.get("methodClass") == "Lcom/example/artfieldwatch/NoTemplateTarget;"
+        and f.get("methodName") == "complexStep"
+    ]
+    sites.sort(key=lambda f: f["dexPc"])
+    expected_sites = [
+        ("value", "write", 0x59), ("value", "read", 0x52),
+        ("other", "write", 0x59), ("other", "read", 0x52),
+    ]
+    if len(sites) != 4 or [
+        (f["fieldName"], f["operation"], int(f["opcode"],16))
+        for f in sites] != expected_sites:
+        raise AssertionError("Packaged complexStep DEX lacks four ordered accesses")
+    if len({f["fieldIndex"] for f in sites}) != 2 or (
+            len({f["methodIndex"] for f in sites}) != 1):
+        raise AssertionError("Non-leaf method/field IDs ambiguous")
+    events = result["events"]
+    if len(events) != 1024:
+        raise AssertionError(f"Expected 1024 opcode events, got {len(events)}")
+    for i in range(128):
+        part = events[8*i:8*i+8]
+        if [e["method"] for e in part[:4]] != list(ORDER):
+            raise AssertionError("Leaf order changed in non-leaf experiment")
+        for j, (site, (field_name, operation, opcode)) in enumerate(
+                zip(sites, expected_sites)):
+            e = part[4+j]
+            expected = 7 + 3*i if field_name == "value" else 8 + 3*i
+            fields = {
+                "seq": 8*i+5+j, "method": "complexStep",
+                "methodClass": site["methodClass"],
+                "declaringClass": site["declaringClass"],
+                "fieldName": field_name, "fieldType": "I",
+                "dexId": dex["dexId"], "dexSha256": dex["sha256"],
+                "methodIndex": site["methodIndex"],
+                "fieldIndex": site["fieldIndex"],"dexPc": site["dexPc"],
+                "opcode": opcode,"kind": 2 if operation == "write" else 1,
+                "value": expected
+            }
+            for k, v in fields.items():
+                if e.get(k) != v:
+                    raise AssertionError(f"Non-leaf event iteration={i}, site={j}, {k}: {e.get(k)!r} != {v!r}")
+            if e.get("dexPcSource") != "single-candidate DEX site":
+                raise AssertionError("Non-leaf DEX PC provenance missing")
+    print("PASS: 512 non-leaf nterp field accesses across ordinary DEX successors")
+
+
 def main():
     if os.environ.get("ARTWATCH_BUILD_VARIANT") != "release":
         raise RuntimeError("Only the non-debuggable release APK is supported")
@@ -108,6 +159,9 @@ def main():
                  "methodName": m["methodName"],
                  "fieldName": m["fields"][0]["fieldName"]}
                 for m in catalog["fixtureMethods"]]
+    selected.extend({"methodClass":"Lcom/example/artfieldwatch/NoTemplateTarget;",
+                     "methodName":"complexStep","fieldName":name}
+                    for name in ("value","other"))
     source = ("globalThis.__artwatchNterpThreadFilter=" +
               json.dumps("NterpFieldProbe") + ";\n" +
               "globalThis.__artwatchNterpSelectors=" + json.dumps(selected) + ";\n" +
@@ -215,7 +269,10 @@ def main():
         snapshot = results["script"].exports_sync.snapshot()
         (out / "nterp-runtime-events.json").write_text(json.dumps(snapshot, indent=2))
         (out / "nterp-probe-messages.json").write_text(json.dumps(events, indent=2))
-        verify(catalog, snapshot)
+        leaf_only = {**snapshot, "events": [
+            e for e in snapshot["events"] if e.get("method") != "complexStep"]}
+        verify(catalog, leaf_only)
+        verify_nonleaf(catalog, snapshot)
     finally:
         if child.poll() is None:
             child.terminate()
