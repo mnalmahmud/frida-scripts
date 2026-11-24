@@ -31,9 +31,9 @@ public final class NoTemplateTarget {
   // The runtime must report two separate DEX PCs for each opcode/field ID.
   public static int repeatedStep(NoTemplateTarget receiver, int value) {
     receiver.value = value;
-    int first = receiver.value;
+    int first = identity(receiver).value;
     receiver.value = value + 2;
-    int second = receiver.value;
+    int second = identity(receiver).value;
     return first + second;
   }
 
