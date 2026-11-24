@@ -198,6 +198,8 @@ function install() {
     const value=f.kind===1
       ? context.r13.add(f.vreg*4).readS32() : f.preValue;
     if (records.length>=MAX_RECORDS) {dropped++;return;}
+    if (records.length < 8) send({type:'artwatch-nterp-record-sample',
+      number:records.length+1, method:f.name, value});
     records.push({seq:records.length+1,method:f.name,
       methodIndex:f.methodIndex,fieldIndex:f.fieldId,dexPc:f.dexPc,
       opcode:f.opcode,kind:f.kind,value,instructionAddress:f.pc,
@@ -207,7 +209,7 @@ function install() {
   function handleException(details) {
     const tid=Process.getCurrentThreadId();
     const state=observedThreads.get(tid);
-    if (firstTrapDiagnostics++ < 4) {
+    if (firstTrapDiagnostics++ < 24) {
       send({type:'artwatch-nterp-trap-diagnostic',
         exceptionType: details.type, tid, tracked:!!state,
         pc:details.context.pc.toString(),
@@ -226,7 +228,12 @@ function install() {
         id=slot;break;
       }
     }
-    if (id===null) return false; // Not our hardware debug trap.
+    if (id===null) {
+      send({type:'artwatch-nterp-unhandled-trap',tid,
+        exceptionType:details.type,pc:hit.toString(),
+        reason:'No matching hardware breakpoint slot'});
+      return false;
+    } // Not our hardware debug trap.
     hardwareHits++;callbacks++;
     try {
       if (state.pending) {
@@ -241,7 +248,11 @@ function install() {
       }
       return true;
     } catch(e) {
-      recordDiagnostic('Hardware debug trap error tid='+tid+': '+e);
+      const message='Hardware debug trap error tid='+tid+': '+(e.stack||e);
+      recordDiagnostic(message);
+      send({type:'artwatch-nterp-exception-error',tid,error:message,
+        slot:id,pending:!!state.pending,
+        pc:hit.toString(),recorded:records.length});
       return false;
     }
   }
