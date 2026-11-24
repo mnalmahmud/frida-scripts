@@ -70,4 +70,19 @@ for (const invalid of [
 assert.throws(()=>select(catalog,[]));
 assert.throws(()=>select(catalog,[{methodClass:cls,methodName:'notFound',fieldName:'a'}]));
 assert.throws(()=>select(catalog,[{methodClass:cls,methodName:'writeA'}]));
+// Execute the complete agent with a deliberately missing ART profile. The
+// initialization must fail closed, but RPC methods must remain usable. This
+// catches lexical-scope mistakes in snapshot()/stop() before emulator CI.
+const smoke = vm.createContext({
+  rpc: {exports:{}},
+  send() {}
+});
+vm.runInContext(file, smoke);
+const initial = smoke.rpc.exports.snapshot();
+assert.equal(initial.ready, false);
+assert.equal(initial.verifiedRuntimeMethods, 0);
+assert.equal(initial.unverifiedSites, 0);
+assert.equal(initial.events.length, 0);
+assert.deepEqual(JSON.parse(JSON.stringify(smoke.rpc.exports.stop())),
+  {removed:0,failures:0,recorded:0});
 console.log('Nterp data-driven field selector self-tests passed');
