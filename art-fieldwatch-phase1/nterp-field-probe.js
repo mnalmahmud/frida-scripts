@@ -15,12 +15,15 @@ const MAX_RECORDS = 512;
 const active = new Map();
 const records = [];
 const diagnostics = [];
-const hooks = [];
+const observedThreads = new Map();
+let threadObserver = null;
+let hardwareHits = 0;
+let fieldHits = 0;
+let completedHits = 0;
 let dropped = 0;
 let callbacks = 0;
 let ready = false;
 let armed = false;
-let attachVerifiedHooks = null;
 const fieldOps = new Set([0x52, 0x59, 0x60, 0x67]);
 const continuationOps = [0x0e, 0x0f];
 // The first continuation after a field access may be a move, nop, or return.
@@ -98,108 +101,181 @@ function install() {
   if (!profile || profile.api !== 33 || profile.architecture !== 'x86_64' ||
       Process.arch !== 'x64' || Process.pointerSize !== 8 ||
       profile.handlerSize !== 128 || profile.opcodeCount !== 256)
-    throw new Error('Unsupported nterp interpreter profile');
+    throw new Error('Unsupported ART / nterp ABI');
   const methods = selectFixtures(catalog);
   const art = Process.findModuleByName('libart.so');
-  if (!art) throw new Error('ART runtime module not loaded');
+  if (!art) throw new Error('libart.so is not mapped');
   const buildId = readLiveBuildId(art);
   if (buildId !== profile.buildId ||
       buildId !== 'c8b6a2df9893030c07b3b96dc24a7d30')
-    throw new Error('Mapped ART build ID does not match verified ELF profile');
+    throw new Error('Unrecognized live ART Build ID');
   if (!Number.isInteger(profile.startOffset) ||
       !Number.isInteger(profile.endOffset) ||
-      profile.endOffset - profile.startOffset !== 128 * 256 ||
+      profile.endOffset - profile.startOffset !== 32768 ||
       profile.startOffset <= 0 || profile.endOffset > art.size)
-    throw new Error('Invalid nterp table offsets');
+    throw new Error('Invalid nterp opcode table');
   const base = art.base.add(profile.startOffset);
-  const installed = [...new Set([...fieldOps, ...continuationOps])];
-  function callback(opcode, context, tid) {
-    if (!armed || (!fieldOps.has(opcode) && !active.has(tid))) return;
-    callbacks++;
-    const pc = context.r12, fp = context.r13;
-    if (pc.isNull() || fp.isNull()) return;
-    const method = context.rsp.readPointer();
-    if (method.isNull()) return;
-    const prev = active.get(tid);
-    if (prev) {
-      active.delete(tid);
-      if (method.equals(prev.method) && fp.equals(prev.fp) &&
-          pc.equals(prev.nextPc)) {
-        const value = prev.kind === 1
-          ? fp.add(prev.vreg * 4).readS32() : prev.value;
-        if (records.length === MAX_RECORDS) {
-          dropped++;
-        } else {
-          records.push({seq: records.length + 1, method: prev.name,
-            methodIndex: prev.methodIndex, fieldIndex: prev.fieldId,
-            dexPc: prev.dexPc, opcode: prev.opcode, kind: prev.kind,
-            value, instructionAddress: prev.pc,
-            provenance: 'nterp opcode and successor (DEX PC mapped from catalog)'});
-        }
+  const ops = [0x52, 0x59, 0x60, 0x67]; // iget, iput, sget, sput
+  const bpIds = new Map(ops.map((opcode, index) => [opcode, index]));
+  for (const opcode of ops) {
+    const site = base.add(opcode * 128);
+    const range = Process.findRangeByAddress(site);
+    if (!range || !range.protection.includes('x'))
+      throw new Error('nterp opcode address not executable: ' + opcode);
+  }
+
+  function installForThread(t) {
+    if (!armed || t.name !== 'NterpFieldProbe' ||
+        observedThreads.has(t.id)) return;
+    const state = {thread:t, slots:new Map(), pending:null};
+    try {
+      for (const op of ops) {
+        const id=bpIds.get(op), at=base.add(op*128);
+        t.setHardwareBreakpoint(id, at);
+        state.slots.set(id, at);
+      }
+      observedThreads.set(t.id,state);
+      send({type:'artwatch-nterp-hardware-thread',tid:t.id,
+        installed:state.slots.size});
+    } catch(e) {
+      for (const id of state.slots.keys())
+        try {t.unsetHardwareBreakpoint(id);} catch(_){}
+      recordDiagnostic('Hardware breakpoints unavailable: '+e);
+    }
+  }
+
+  function switchBreakpoint(state,id,to) {
+    const old=state.slots.get(id);
+    if (!old || old.equals(to))
+      throw new Error('Cannot advance debug breakpoint id='+id);
+    state.thread.unsetHardwareBreakpoint(id);
+    state.slots.delete(id);
+    state.thread.setHardwareBreakpoint(id,to);
+    state.slots.set(id,to);
+  }
+
+  function beginField(context,state,opcode) {
+    const pc=context.r12, fp=context.r13;
+    const method=context.rsp.readPointer();
+    if (pc.isNull() || fp.isNull() || method.isNull() || pc.readU8()!==opcode)
+      throw new Error('Invalid nterp interpreter state');
+    // All DEX field opcodes are 2 code units long.
+    const nextPc=pc.add(4), successorOpcode=nextPc.readU8();
+    const destination=base.add(successorOpcode*128);
+    const id=bpIds.get(opcode);
+    const methodIndex=method.add(8).readU32();
+    const target=methods.get(methodIndex);
+    const high=pc.add(1).readU8(), fieldId=pc.add(2).readU16();
+    let sampled=null;
+    if (target && target.opcode===opcode && target.fieldId===fieldId &&
+        (context.rbx.toUInt32()&255)===high &&
+        successorOpcode===(target.kind===1 ? 0x0f : 0x0e)) {
+      const vreg=opcode>=0x60 ? high : high&15;
+      sampled={name:target.name,kind:target.kind,opcode,
+        fieldId,methodIndex,dexPc:target.dexPc,
+        vreg,preValue:target.kind===2 ? fp.add(vreg*4).readS32() : null,
+        pc:pc.toString()};
+      fieldHits++;
+    }
+    // Hardware breakpoint is raised BEFORE opcode execution. Redirect the
+    // same slot to the successor opcode; that trap occurs after the field
+    // operation on the normal (nonthrowing) path. We never patch ART code.
+    switchBreakpoint(state,id,destination);
+    state.pending={id,original:base.add(opcode*128),destination,
+      nextPc,method,fp,sampled};
+  }
+
+  function completeField(context,state) {
+    const p=state.pending;
+    state.pending=null;
+    switchBreakpoint(state,p.id,p.original);
+    if (!context.r12.equals(p.nextPc) || !context.r13.equals(p.fp) ||
+        !context.rsp.readPointer().equals(p.method)) return;
+    completedHits++;
+    if (!p.sampled) return;
+    const f=p.sampled;
+    const value=f.kind===1
+      ? context.r13.add(f.vreg*4).readS32() : f.preValue;
+    if (records.length>=MAX_RECORDS) {dropped++;return;}
+    records.push({seq:records.length+1,method:f.name,
+      methodIndex:f.methodIndex,fieldIndex:f.fieldId,dexPc:f.dexPc,
+      opcode:f.opcode,kind:f.kind,value,instructionAddress:f.pc,
+      provenance:'nterp hardware breakpoint and succeeding opcode'});
+  }
+
+  function handleException(details) {
+    if (!armed || !['breakpoint','single-step'].includes(details.type))
+      return false;
+    const tid=Process.getCurrentThreadId(),state=observedThreads.get(tid);
+    if (!state) return false;
+    const hit=details.context.pc;
+    let id=null;
+    for (const [slot,address] of state.slots) {
+      if (hit.equals(address) ||
+          (details.address && details.address.equals(address))) {
+        id=slot;break;
       }
     }
-    if (!fieldOps.has(opcode)) return;
-    const methodIndex = method.add(8).readU32();
-    const target = methods.get(methodIndex);
-    if (!target || target.opcode !== opcode) return;
-    const rawOp = pc.readU8();
-    const high = pc.add(1).readU8();
-    const fieldIdx = pc.add(2).readU16();
-    // At nterp handler entry rbx.low8 is the first DEX word's high byte.
-    if (rawOp !== opcode || fieldIdx !== target.fieldId ||
-        (context.rbx.toUInt32() & 0xff) !== high) return;
-    const vregA = opcode >= 0x60 ? high : (high & 0xf);
-    const value = target.kind === 2 ? fp.add(vregA * 4).readS32() : null;
-    active.set(tid, {method, fp, name: target.name,
-      methodIndex, fieldId: fieldIdx, dexPc: target.dexPc,
-      opcode, kind: target.kind, pc: pc.toString(),
-      nextPc: pc.add(4), vreg: vregA, value});
-  }
-  // Do not patch nterp before Android's process initialization finishes.
-  // The isolated test activity starts idle; the host explicitly arms before
-  // triggering its first field operation.
-  attachVerifiedHooks = function () {
-    for (const opcode of installed) {
-      const address = base.add(opcode * 128);
-      const range = Process.findRangeByAddress(address);
-      if (!range || !range.protection.includes('x'))
-        throw new Error('nterp handler not executable: 0x' + opcode.toString(16));
-      hooks.push(Interceptor.attach(address, {
-        onEnter() {
-          try { callback(opcode, this.context, this.threadId); }
-          catch (e) { recordDiagnostic('opcode 0x' + opcode.toString(16) + ': ' + e); }
-        }
-      }));
-    }
-  };
-  ready = true;
-  send({type: 'artwatch-nterp-init', ready: true,
-    buildId, candidateHandlers: installed.length, attachedHandlers: 0,
-    moduleBase: art.base.toString(), handlerTable: base.toString()});
-}
-rpc.exports = {
-  arm() {
-    if (!ready || armed || attachVerifiedHooks === null) return false;
+    if (id===null) return false; // Not our hardware debug trap.
+    hardwareHits++;callbacks++;
     try {
-      attachVerifiedHooks();
-      armed = true;
-      send({type:'artwatch-nterp-armed',handlerCount:hooks.length});
+      if (state.pending) {
+        if (state.pending.id!==id ||
+            !state.pending.destination.equals(state.slots.get(id)))
+          throw new Error('Unexpected overlapping nterp exception');
+        completeField(details.context,state);
+      } else {
+        if (!state.slots.get(id).equals(base.add(ops[id]*128)))
+          throw new Error('Hardware breakpoint slot identity changed');
+        beginField(details.context,state,ops[id]);
+      }
       return true;
-    } catch (e) {
-      hooks.forEach(h => h.detach());
-      hooks.length = 0;
-      recordDiagnostic('Failed to arm nterp: ' + e);
+    } catch(e) {
+      recordDiagnostic('Hardware debug trap error tid='+tid+': '+e);
+      return false;
+    }
+  }
+
+  function armThreads() {
+    // Only the synthetic Java worker is instrumented in this first proof.
+    // Process.attachThreadObserver sees existing threads and future renames.
+    Process.setExceptionHandler(handleException);
+    armed=true;
+    threadObserver=Process.attachThreadObserver({
+      onAdded(t){installForThread(t);},
+      onRenamed(t){installForThread(t);},
+      onRemoved(t){observedThreads.delete(t.id);}
+    });
+    return true;
+  }
+
+  ready=true;
+  send({type:'artwatch-nterp-init',ready:true,mode:'hardware-breakpoint',
+    buildId,candidateHandlers:ops.length,attachedHandlers:0,
+    moduleBase:art.base.toString(),handlerTable:base.toString()});
+  return armThreads;
+}
+let armBackend=null;
+rpc.exports={
+  arm(){
+    if (!ready || armed || !armBackend) return false;
+    try{return armBackend();}
+    catch(e){
+      recordDiagnostic('Failed to enable nterp hardware breakpoints: '+e);
+      armed=false;
+      if(threadObserver){threadObserver.detach();threadObserver=null;}
       return false;
     }
   },
-  snapshot() {
-    return {ready, armed, callbacks, events: records.slice(), dropped,
-      errors: diagnostics.slice(), pending: active.size};
+  snapshot(){
+    return {ready,armed,callbacks,hardwareHits,fieldHits,completedHits,
+      watchedThreads:Array.from(observedThreads.keys()),events:records.slice(),
+      dropped,errors:diagnostics.slice(),
+      pending:Array.from(observedThreads.values()).filter(t=>t.pending).length};
   }
 };
-try { install(); }
-catch (e) {
-  hooks.forEach(h => h.detach());
-  recordDiagnostic(e.stack || e);
-  send({type: 'artwatch-nterp-init', ready: false, error: String(e)});
+try{armBackend=install();}
+catch(e){
+  recordDiagnostic(e.stack||e);
+  send({type:'artwatch-nterp-init',ready:false,error:String(e)});
 }

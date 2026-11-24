@@ -636,3 +636,16 @@ Android application initialization was unsafe. Hooks are now installed only
 on the host's explicit arm request after the separate process reaches an idle
 state. This is a safety gate, not yet proof that nterp instruction hooks execute
 correctly. If a hook triggers an ART crash or zero events, CI must fail.
+
+## Hardware breakpoint nterp experiment (2026-11-24)
+
+Inline Frida interception of Android 13's shared nterp opcode handler entries
+crashed stock ART in two separate CI emulator runs. That unsafe path has now
+been removed. This experiment uses Frida's documented per-thread **hardware
+execution breakpoints** and native exception handler instead, avoiding edits
+to ART executable memory. Four slots observe iget/iput/sget/sput on the single
+synthetic worker thread, temporarily redirecting the slot to the next DEX
+opcode handler to sample successful reads and writes. The ELF build-ID gate,
+DEX identity checks, and strict 512-event host oracle are retained.
+Hardware breakpoint availability and runtime correctness still require CI
+verification; this is not JIT/AOT or general app-wide coverage.
