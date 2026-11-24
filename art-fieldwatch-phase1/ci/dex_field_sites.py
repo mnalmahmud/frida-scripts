@@ -144,6 +144,7 @@ class Dex:
     def sites(self):
         out=[]
         self.fixture_methods=[]
+        self.field_methods=[]
         for cls in range(self.classes_count):
             pos=self.classes_off+cls*32
             class_type=self.typ(u32(self.data,pos))
@@ -196,6 +197,12 @@ class Dex:
                                         "sourceFile":source,"sourceLine":line,
                                         "opcode":f"0x{op:02x}"})
                         pc+=width
+                    if len(out) > first_site:
+                        # One copy of each field-bearing method's exact instruction
+                        # bytes. A runtime PC must be bound to this stream before
+                        # claiming a source DEX PC, including repeated field sites.
+                        self.field_methods.append({**method, "insnsSize":insns,
+                            "insnsHex":self.data[base:base+2*insns].hex()})
                     if fixture_leaf:
                         self.fixture_methods.append({**method, "opcodes":leaf_ops,
                                                      "fields":out[first_site:]})
@@ -258,7 +265,8 @@ def inventory(apk):
             sites=dex.sites()
             fixture_methods.extend({**m,"dexId":dex_id} for m in dex.fixture_methods)
             dex_files.append({"dexId":dex_id,"name":name,"sha256":dex.shasum,
-                              "fieldAccesses":sites,"count":len(sites)})
+                              "fieldAccesses":sites,"fieldMethods":dex.field_methods,
+                              "count":len(sites)})
         return {"schemaVersion":1,"apk":Path(apk).name,
                 "totalFieldSites":sum(d["count"] for d in dex_files),
                 "dexFiles":dex_files,"fixtureMethods":fixture_methods}
