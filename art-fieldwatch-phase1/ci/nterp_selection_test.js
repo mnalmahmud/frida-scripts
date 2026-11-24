@@ -21,8 +21,8 @@ const mk = (methodName, methodIndex, fieldName, fieldIndex, dexPc, opcode, opera
 const fields = [
   mk('writeA', 10, 'a', 1, 0, '0x59', 'write', 'instance'),
   mk('readA', 11, 'a', 1, 0, '0x52', 'read', 'instance'),
-  mk('writeB', 12, 'b', 2, 4, '0x67', 'write', 'static'),
-  mk('readB', 13, 'b', 2, 6, '0x60', 'read', 'static')
+  mk('writeB', 12, 'b', 2, 0, '0x67', 'write', 'static'),
+  mk('readB', 13, 'b', 2, 0, '0x60', 'read', 'static')
 ];
 const codeFor = f => f.opcode.slice(2).toLowerCase() + '00' +
   f.fieldIndex.toString(16).padStart(2,'0') + '00';
