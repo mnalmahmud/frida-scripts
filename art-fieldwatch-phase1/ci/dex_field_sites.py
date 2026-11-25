@@ -201,7 +201,9 @@ class Dex:
                         # One copy of each field-bearing method's exact instruction
                         # bytes. A runtime PC must be bound to this stream before
                         # claiming a source DEX PC, including repeated field sites.
-                        self.field_methods.append({**method, "insnsSize":insns,
+                        self.field_methods.append({**method,
+                            "registersSize":u16(self.data,code),
+                            "insnsSize":insns,
                             "insnsHex":self.data[base:base+2*insns].hex()})
                     if fixture_leaf:
                         self.fixture_methods.append({**method, "opcodes":leaf_ops,

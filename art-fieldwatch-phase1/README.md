@@ -909,3 +909,45 @@ is patched.
 This is a concurrency test scoped to two named threads executing
 a known nterp workload. It does not demonstrate automatic coverage
 of an arbitrary application's UI, GC, JIT or AOT compiled threads.
+
+## GC-visible object field snapshots (experimental, 2026-11-25)
+
+The new `allFields` Stalker mode extends the 24 primitive opcode handlers
+with `iget-object` (0x54), `iput-object` (0x5b),
+`sget-object` (0x62), and `sput-object` (0x69). It accepts only
+object/array DEX field descriptors, requires the exact packaged
+`registers_size` for each object-bearing method, and verifies the
+running DEX instruction stream and live DEX PC before attributing an
+event.
+
+ART nterp keeps a separate, GC-scanned array of 32-bit reference
+registers immediately below its ordinary virtual registers. The
+probe reads the corresponding **GC-visible root slot** at the
+field-opcode boundary (before a successful write, after a successful
+read); it never dereferences the object or converts a raw compressed
+reference to a JNI handle. The record carries
+`raw-nterp-gc-root-u32-ephemeral`, `referenceIsNull`, and
+`referenceSnapshotGcStable:false`. The 8-digit hex payload is
+exact *at observation time* but is **not a stable object identity**:
+a moving GC can change the underlying reference bits after capture.
+
+An independent non-debuggable release mode selects both the 24
+primitive and four object field opcode families in **one** named
+worker-thread Stalker execution. Its oracle requires 5,632
+real field events per 128 iterations: 5,120 primitive events and
+512 object reference events, with alternating null and nonnull
+instance/static object slots, exact method/field/DEX-PC attribution,
+and two unsuccessful null-receiver attempts excluded from completed
+events. The Java workload keeps the two nonnull objects strongly
+reachable while exercising real object-field getters and setters.
+A separate static oracle rejects invalid reference metadata, raw
+bit patterns, descriptors, and counts.
+
+**This is not complete GC-safe Java object observation.** It does
+not pin objects, track identity through compaction, inspect fields of
+the referenced object, or resolve Java class/member values for a
+recorded reference. Those require ART-native rooted handles or JNI
+references created within a valid mutator state. Similarly, this
+nterp Stalker backend does not observe field instructions executed
+in compiled JIT/AOT code, alternative ART interpreters, or all
+Android versions and CPU architectures.

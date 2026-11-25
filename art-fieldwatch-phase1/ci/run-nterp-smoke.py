@@ -43,6 +43,11 @@ WIDE_FIELDS = {
     "readStaticDouble": ("D", "sharedDouble")
 }
 MASK64 = (1 << 64) - 1
+OBJECT_ORDER = ("writeInstanceObject", "writeStaticObject",
+                "readInstanceObject", "readStaticObject")
+OBJECT_OPCODES = (0x5b, 0x69, 0x54, 0x62)
+OBJECT_FIELD_NAMES = ("reference", "sharedObject", "reference", "sharedObject")
+
 # One four-breakpoint family is armed per process and test invocation.
 NARROW = {
     "boolean8": ("Boolean", "Z", "flag", "sharedBoolean", "boolean",
@@ -605,6 +610,192 @@ def verify_all_primitives(catalog, result):
 
 
 
+def verify_object_events(catalog, events):
+    """Verify transient ART GC-reference-register contents, not JNI handles.
+
+    Live reference bits are exact register snapshots. A moving GC may update
+    the root after capture, so these are never persistent object identifiers.
+    """
+    if len(catalog["dexFiles"]) != 1:
+        raise AssertionError("Object field oracle requires one packaged DEX")
+    dex = catalog["dexFiles"][0]
+    sites = []
+    for j, name in enumerate(OBJECT_ORDER):
+        owner = ("Lcom/example/artfieldwatch/NoTemplateTarget;"
+                 if "Instance" in name else
+                 "Lcom/example/artfieldwatch/NoTemplateStaticState;")
+        candidates = [f for f in dex["fieldAccesses"]
+                      if f["methodName"] == name and f["methodClass"] == owner]
+        if len(candidates) != 1:
+            raise AssertionError(f"Expected exactly one reference DEX site: {name}")
+        site = candidates[0]
+        if (site["fieldName"] != OBJECT_FIELD_NAMES[j] or
+                site["fieldType"] != "Ljava/lang/Object;" or
+                site["valueKind"] != "object" or
+                int(site["opcode"], 16) != OBJECT_OPCODES[j] or
+                site["operation"] != ("write" if j < 2 else "read")):
+            raise AssertionError(f"Wrong DEX object opcode/identity: {site}")
+        method = next((m for m in dex["fieldMethods"]
+                       if m["methodIndex"] == site["methodIndex"]), None)
+        if not method or not isinstance(method.get("registersSize"), int) or (
+                method["registersSize"] < 1):
+            raise AssertionError("Object method has no exact registers_size")
+        sites.append(site)
+    if len(events) != 512:
+        raise AssertionError(f"Expected 512 reference field events; got {len(events)}")
+    live_methods = {}
+    for i in range(128):
+        vals = []
+        for j, name in enumerate(OBJECT_ORDER):
+            event = events[4*i+j]
+            site = sites[j]
+            is_null = (i % 2 == 1) if j % 2 == 0 else (i % 2 == 0)
+            expected = {
+                "method":name,"methodClass":site["methodClass"],
+                "declaringClass":site["declaringClass"],
+                "fieldName":OBJECT_FIELD_NAMES[j],
+                "fieldType":"Ljava/lang/Object;",
+                "valueRepresentation":"raw-nterp-gc-root-u32-ephemeral",
+                "dexId":dex["dexId"],"dexSha256":dex["sha256"],
+                "methodIndex":site["methodIndex"],
+                "fieldIndex":site["fieldIndex"],"dexPc":site["dexPc"],
+                "opcode":OBJECT_OPCODES[j],
+                "kind":2 if j<2 else 1,
+                "referenceIsNull":is_null,
+                "referenceSnapshotGcStable":False,
+                "referenceScope":"single-nterp-opcode-completion",
+                "dexPcSource":"live instruction base verified against packaged DEX bytes"
+            }
+            for key, value in expected.items():
+                if event.get(key) != value:
+                    raise AssertionError(
+                        f"Reference event iteration={i} site={j} {key}: "
+                        f"{event.get(key)!r} != {value!r}")
+            raw = event.get("value")
+            if (not isinstance(raw,str) or len(raw)!=10 or not raw.startswith("0x") or
+                    any(ch not in "0123456789abcdef" for ch in raw[2:])):
+                raise AssertionError("Reference is not an exact 32-bit hex snapshot")
+            if (raw=="0x00000000") != is_null:
+                raise AssertionError("Reference snapshot nullness does not match Java oracle")
+            vals.append(raw)
+            method=event.get("runtimeMethodAddress")
+            instruction=event.get("instructionAddress")
+            if not method or not instruction:
+                raise AssertionError("Missing object field runtime provenance")
+            identity=(event["dexSha256"],event["dexId"],event["methodIndex"])
+            binding=(method,int(instruction,16)-2*event["dexPc"])
+            previous=live_methods.setdefault(identity,binding)
+            if previous!=binding:
+                raise AssertionError("Object field runtime method binding changed")
+        # Four field accesses are adjacent with no intervening heap
+        # allocation; a write/read pair must retain its raw root bits
+        # for this controlled no-GC synthetic fixture.
+        if vals[0]!=vals[2] or vals[1]!=vals[3]:
+            raise AssertionError("Object write/read root snapshot changed unexpectedly")
+    return len(live_methods)
+
+
+def verify_all_fields(catalog, result):
+    if (result.get("ready") is not True or
+            result.get("mode") != "stalker-callout" or
+            result.get("opcodeGroup") != "allFields" or
+            result.get("errors") or result.get("dropped") or
+            result.get("unverifiedSites") or result.get("pending") or
+            not result.get("threadsFollowed")):
+        raise AssertionError("All-field nterp backend unavailable or rejected")
+    events=result["events"]
+    if len(events)!=5632 or result.get("fieldHits")!=5634 or (
+            result.get("completedHits")!=5632):
+        raise AssertionError(
+            f"Expected 5632 field events plus two failed null attempts: "
+            f"events={len(events)} hits={result.get('fieldHits')} "
+            f"completed={result.get('completedHits')}")
+    primitive,objects=[],[]
+    for i in range(128):
+        part=events[44*i:44*i+44]
+        if len(part)!=44:
+            raise AssertionError("Malformed all-field iteration size")
+        for j,e in enumerate(part):
+            if e.get("seq")!=44*i+j+1:
+                raise AssertionError("Non-contiguous all-field sequence")
+            if j<40:
+                primitive.append({**e,"seq":len(primitive)+1})
+            else:
+                objects.append(e)
+    primitive_methods={(e["dexSha256"],e["dexId"],e["methodIndex"])
+                       for e in primitive}
+    primitive_result={**result,"opcodeGroup":"allPrimitives",
+                      "events":primitive,"fieldHits":5122,
+                      "completedHits":5120,
+                      "verifiedRuntimeMethods":len(primitive_methods)}
+    verify_all_primitives(catalog,primitive_result)
+    object_methods=verify_object_events(catalog,objects)
+    total_methods={(e["dexSha256"],e["dexId"],e["methodIndex"])
+                   for e in events}
+    if len(total_methods)!=len(primitive_methods)+object_methods or (
+            result.get("verifiedRuntimeMethods")!=len(total_methods)):
+        raise AssertionError("All-field ArtMethod/DEX binding count mismatch")
+    print("PASS: 5632 exact primitive and object-reference field accesses "
+          "in one non-debuggable stock ART nterp pass")
+
+
+
+def object_self_test():
+    dex={"dexId":0,"sha256":"a"*64,"fieldAccesses":[],"fieldMethods":[]}
+    for j,name in enumerate(OBJECT_ORDER):
+        owner=("Lcom/example/artfieldwatch/NoTemplateTarget;"
+               if "Instance" in name else
+               "Lcom/example/artfieldwatch/NoTemplateStaticState;")
+        dex["fieldAccesses"].append({
+            "methodName":name,"methodClass":owner,
+            "declaringClass":owner,"fieldName":OBJECT_FIELD_NAMES[j],
+            "fieldType":"Ljava/lang/Object;","valueKind":"object",
+            "methodIndex":80+j,"fieldIndex":10+j,"dexPc":0,
+            "opcode":f"0x{OBJECT_OPCODES[j]:02x}",
+            "operation":"write" if j<2 else "read"
+        })
+        dex["fieldMethods"].append({"methodIndex":80+j,
+                                    "registersSize":3})
+    rows=[]
+    for i in range(128):
+        values=("0x00001000" if i%2==0 else "0x00000000",
+                "0x00000000" if i%2==0 else "0x00002000")
+        for j,name in enumerate(OBJECT_ORDER):
+            site=dex["fieldAccesses"][j]
+            raw=values[j%2]
+            rows.append({
+                "seq":len(rows)+1,"method":name,
+                "methodClass":site["methodClass"],
+                "declaringClass":site["declaringClass"],
+                "fieldName":site["fieldName"],"fieldType":site["fieldType"],
+                "valueRepresentation":"raw-nterp-gc-root-u32-ephemeral",
+                "dexId":0,"dexSha256":dex["sha256"],
+                "methodIndex":site["methodIndex"],
+                "fieldIndex":site["fieldIndex"],"dexPc":0,
+                "opcode":OBJECT_OPCODES[j],"kind":2 if j<2 else 1,
+                "value":raw,"referenceIsNull":raw=="0x00000000",
+                "referenceSnapshotGcStable":False,
+                "referenceScope":"single-nterp-opcode-completion",
+                "dexPcSource":"live instruction base verified against packaged DEX bytes",
+                "runtimeMethodAddress":f"0x{0x1000+j*16:x}",
+                "instructionAddress":f"0x{0x2000+j*16:x}"
+            })
+    catalog={"dexFiles":[dex]}
+    if verify_object_events(catalog,rows)!=4:
+        raise AssertionError("Synthetic object ArtMethod count mismatch")
+    for invalid in (
+        rows[:-1],
+        [{**rows[0],"value":"0x00000000"},*rows[1:]],
+        [{**rows[0],"referenceSnapshotGcStable":True},*rows[1:]],
+        [{**rows[0],"opcode":0x52},*rows[1:]],
+        [{**rows[0],"referenceIsNull":True},*rows[1:]]
+    ):
+        try:verify_object_events(catalog,invalid)
+        except AssertionError:pass
+        else:raise AssertionError("Corrupt object reference event accepted")
+    print("nterp transient GC-root reference event verifier self-test passed")
+
+
 def verify_parallel(catalog, result):
     """Validate two concurrently followed workers using one field pair.
 
@@ -745,10 +936,10 @@ def main():
     opcode_group = os.environ.get("ARTWATCH_NTERP_GROUP", "scalar32")
     backend = os.environ.get("ARTWATCH_NTERP_BACKEND", "hardware")
     workload = os.environ.get("ARTWATCH_NTERP_WORKLOAD", "default")
-    if opcode_group not in ("scalar32", "wide64", "allPrimitives", *NARROW):
+    if opcode_group not in ("scalar32", "wide64", "allPrimitives", "allFields", *NARROW):
         raise RuntimeError("Unsupported ARTWATCH_NTERP_GROUP")
     if backend not in ("hardware", "software") or (
-            (backend == "software") != (opcode_group == "allPrimitives")):
+            (backend == "software") != (opcode_group in ("allPrimitives","allFields"))):
         raise RuntimeError("allPrimitives requires the isolated software backend")
     if workload not in ("default","parallel") or (
             workload == "parallel" and backend != "software"):
@@ -795,7 +986,7 @@ def main():
                             "Lcom/example/artfieldwatch/NoTemplateStaticState;"),
             "methodName": name, "fieldName": "floating"
         } for name in FLOAT_ORDER)
-        if opcode_group == "allPrimitives":
+        if opcode_group in ("allPrimitives","allFields"):
             selected.extend({
                 "methodClass": ("Lcom/example/artfieldwatch/NoTemplateTarget;"
                                 if "Instance" in name else
@@ -811,6 +1002,13 @@ def main():
                     "methodName":name,
                     "fieldName":inst_name if "Instance" in name else static_name
                 } for name in narrow_names(group))
+            if opcode_group == "allFields":
+                selected.extend({
+                    "methodClass": ("Lcom/example/artfieldwatch/NoTemplateTarget;"
+                                    if "Instance" in name else
+                                    "Lcom/example/artfieldwatch/NoTemplateStaticState;"),
+                    "methodName":name, "fieldName":OBJECT_FIELD_NAMES[j]
+                } for j,name in enumerate(OBJECT_ORDER))
     source = ("globalThis.__artwatchNterpOpcodeGroup=" +
               json.dumps(opcode_group) + ";\n" +
               "globalThis.__artwatchNterpThreadFilter=" +
@@ -968,6 +1166,8 @@ def main():
             json.dumps(events, indent=2))
         if workload == "parallel":
             verify_parallel(catalog,snapshot)
+        elif opcode_group == "allFields":
+            verify_all_fields(catalog,snapshot)
         elif opcode_group == "allPrimitives":
             verify_all_primitives(catalog,snapshot)
         elif opcode_group == "wide64":
@@ -1017,5 +1217,6 @@ if __name__ == "__main__":
         wide_self_test()
         narrow_self_test()
         parallel_self_test()
+        object_self_test()
     else:
         main()

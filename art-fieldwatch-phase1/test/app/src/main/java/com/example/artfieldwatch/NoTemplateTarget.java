@@ -11,6 +11,7 @@ public final class NoTemplateTarget {
   private byte tiny;
   private char glyph;
   private short small;
+  private Object reference;
 
   public static void writeInstance(NoTemplateTarget receiver, int x) {
     receiver.value = x;
@@ -69,6 +70,13 @@ public final class NoTemplateTarget {
     return receiver.small;
   }
 
+  public static void writeInstanceObject(NoTemplateTarget receiver, Object value) {
+    receiver.reference = value;
+  }
+  public static Object readInstanceObject(NoTemplateTarget receiver) {
+    return receiver.reference;
+  }
+
   // Non-leaf DEX method: 2 field writes and 2 reads with intervening
   // identity invokes; not instrumented by Java sink calls.
   private static NoTemplateTarget identity(NoTemplateTarget target) {
@@ -100,6 +108,10 @@ public final class NoTemplateTarget {
   public static int exerciseParallelInstance(int worker) {
     NoTemplateTarget receiver = new NoTemplateTarget();
     int checksum = 0;
+    // These remain strongly reachable Java locals. The agent records only
+    // transient GC-root slot bits, not durable object addresses.
+    Object instanceReference = new Object();
+    Object staticReference = new Object();
     for (int i = 0; i < 128; i++) {
       int value = 10000 * (worker + 1) + 17 * i;
       writeInstance(receiver, value);
@@ -183,6 +195,13 @@ public final class NoTemplateTarget {
       if (readInstanceShort(receiver) != instanceShort ||
           NoTemplateStaticState.readStaticShort() != staticShort)
         throw new AssertionError("Signed short field mismatch at " + i);
+      Object expectedInstanceObject = (i & 1) == 0 ? instanceReference : null;
+      Object expectedStaticObject = (i & 1) == 0 ? null : staticReference;
+      writeInstanceObject(receiver, expectedInstanceObject);
+      NoTemplateStaticState.writeStaticObject(expectedStaticObject);
+      if (readInstanceObject(receiver) != expectedInstanceObject ||
+          NoTemplateStaticState.readStaticObject() != expectedStaticObject)
+        throw new AssertionError("Reference field mismatch at " + i);
       checksum += observedInstance + observedStatic;
     }
     int failed = 0;
@@ -207,6 +226,7 @@ final class NoTemplateStaticState {
   private static byte sharedByte;
   private static char sharedChar;
   private static short sharedShort;
+  private static Object sharedObject;
   static void writeStatic(int x) { shared = x; }
   static int readStatic() { return shared; }
   static void writeStaticFloat(float value) { floating = value; }
@@ -223,4 +243,6 @@ final class NoTemplateStaticState {
   static char readStaticChar() { return sharedChar; }
   static void writeStaticShort(short value) { sharedShort = value; }
   static short readStaticShort() { return sharedShort; }
+  static void writeStaticObject(Object value) { sharedObject = value; }
+  static Object readStaticObject() { return sharedObject; }
 }

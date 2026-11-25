@@ -21,24 +21,27 @@ function selectForGroup(group) {
     short16: [0x58,0x5f,0x66,0x6d],
     allPrimitives: [0x52,0x53,0x55,0x56,0x57,0x58,0x59,0x5a,
       0x5c,0x5d,0x5e,0x5f,0x60,0x61,0x63,0x64,0x65,
-      0x66,0x67,0x68,0x6a,0x6b,0x6c,0x6d]
+      0x66,0x67,0x68,0x6a,0x6b,0x6c,0x6d],
+    allFields: Array.from({length:28},(_,i)=>0x52+i)
   };
   const ops = opcodeGroups[group];
-  const source = group === 'allPrimitives' ? softFile : file;
+  const source = ['allPrimitives','allFields'].includes(group)
+    ? softFile : file;
   const selectorBegin=source.indexOf('function selectFieldSites(data, selectors) {');
   const selectorEnd=source.indexOf('\nfunction install() {',selectorBegin);
   assert(selectorBegin >= 0 && selectorEnd > selectorBegin);
   vm.runInContext(
     'const opcodeGroup=' + JSON.stringify(group) + ';\n' +
     'const fieldOps=new Set(' + JSON.stringify(ops) + ');\n' +
-    'const readOps=new Set([0x52,0x53,0x55,0x56,0x57,0x58,' +
-      '0x60,0x61,0x63,0x64,0x65,0x66]);\n' +
+    'const readOps=new Set([0x52,0x53,0x54,0x55,0x56,0x57,0x58,' +
+      '0x60,0x61,0x62,0x63,0x64,0x65,0x66]);\n' +
     source.slice(selectorBegin, selectorEnd) + '\nglobalThis.select=selectFieldSites;', ctx);
   return ctx.select;
 }
 const select = selectForGroup('scalar32');
 const selectWide = selectForGroup('wide64');
 const selectAll = selectForGroup('allPrimitives');
+const selectAllFields = selectForGroup('allFields');
 const cls = 'Lexample/Sample;';
 const mk = (methodName, methodIndex, fieldName, fieldIndex, dexPc, opcode, operation, access) => ({
   methodClass: cls, methodName, methodIndex, fieldName, fieldIndex, dexPc,
@@ -108,6 +111,49 @@ const wideDex={...dex,fieldAccesses:wideFields,
 assert.equal(selectWide({dexFiles:[wideDex]}).count,4);
 assert.equal(selectAll({dexFiles:[wideDex]}).count,4);
 assert.equal(selectAll({dexFiles:[floatDex]}).count,5);
+assert.equal(selectAllFields({dexFiles:[floatDex]}).count,5);
+const objectOpcodes=[0x5b,0x69,0x54,0x62];
+const objectNames=['writeInstanceObject','writeStaticObject',
+                   'readInstanceObject','readStaticObject'];
+const objectFields=fields.map((f,i)=>({
+  ...f,methodIndex:50+i,methodName:objectNames[i],
+  fieldName:i%2===0?'reference':'sharedObject',
+  valueKind:'object',fieldType:'Ljava/lang/Object;',
+  opcode:'0x'+objectOpcodes[i].toString(16),
+  operation:i<2?'write':'read',
+  access:i%2===0?'instance':'static'
+}));
+const objectDex={...dex,fieldAccesses:objectFields,
+  fieldMethods:objectFields.map(f=>({
+    methodIndex:f.methodIndex,methodClass:f.methodClass,
+    methodName:f.methodName,registersSize:3,
+    insnsSize:2,insnsHex:codeFor(f)
+  }))};
+assert.equal(selectAllFields({dexFiles:[objectDex]}).count,4);
+assert.throws(()=>selectAll({dexFiles:[objectDex]}));
+for(let i=0;i<4;i++) {
+  const site=selectAllFields({dexFiles:[objectDex]})
+    .methods.get(50+i)[0].sites.get(0);
+  assert.equal(site.kind,i<2?2:1);
+  assert.equal(site.registersSize,3);
+  assert.equal(site.fieldType,'Ljava/lang/Object;');
+}
+const objectArray={...objectDex,fieldAccesses:[
+  {...objectFields[0],fieldType:'[[Ljava/lang/String;'},
+  ...objectFields.slice(1)]};
+assert.equal(selectAllFields({dexFiles:[objectArray]}).count,4);
+const unrooted={...objectDex,fieldMethods:objectDex.fieldMethods.map(
+  ({registersSize,...other})=>other)};
+assert.throws(()=>selectAllFields({dexFiles:[unrooted]}));
+const mismatchedOp={...objectDex,fieldAccesses:[
+  {...objectFields[0],valueKind:'int',fieldType:'I'},
+  ...objectFields.slice(1)]};
+assert.equal(selectAllFields({dexFiles:[mismatchedOp]}).count,3);
+const badReferenceDescriptor={...objectDex,fieldAccesses:[
+  {...objectFields[0],fieldType:'not-a-reference'},
+  ...objectFields.slice(1)]};
+assert.equal(selectAllFields({dexFiles:[badReferenceDescriptor]}).count,3);
+
 assert.equal(selectWide({dexFiles:[wideDex]}).methods.get(23)[0].sites.get(0).fieldType,'D');
 
 const narrowFamilies = {

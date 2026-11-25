@@ -100,6 +100,11 @@ if [[ "$variant" == release && "${ARTWATCH_SHADOW_SHIM:-0}" == 1 ]]; then
   adb shell am force-stop com.example.artfieldwatch
   ARTWATCH_NTERP_GROUP=allPrimitives ARTWATCH_NTERP_BACKEND=software \
     python3 art-fieldwatch-phase1/ci/run-nterp-smoke.py
+  # Object field opcodes use ART's GC-scanned reference vreg array.
+  # This is a new experiment, separate from the proven primitive pass.
+  adb shell am force-stop com.example.artfieldwatch
+  ARTWATCH_NTERP_GROUP=allFields ARTWATCH_NTERP_BACKEND=software \
+    python3 art-fieldwatch-phase1/ci/run-nterp-smoke.py
   # Two independent named workers run the same verified field leaf DEX.
   # The host holds their Java start gate until Stalker follows both TIDs.
   adb shell am force-stop com.example.artfieldwatch

@@ -27,6 +27,12 @@ const opcodeGroups = Object.freeze({
   allPrimitives: Object.freeze([
     0x52,0x53,0x55,0x56,0x57,0x58,0x59,0x5a,0x5c,0x5d,0x5e,0x5f,
     0x60,0x61,0x63,0x64,0x65,0x66,0x67,0x68,0x6a,0x6b,0x6c,0x6d
+  ]),
+  allFields: Object.freeze([
+    0x52,0x53,0x54,0x55,0x56,0x57,0x58,
+    0x59,0x5a,0x5b,0x5c,0x5d,0x5e,0x5f,
+    0x60,0x61,0x62,0x63,0x64,0x65,0x66,
+    0x67,0x68,0x69,0x6a,0x6b,0x6c,0x6d
   ])
 });
 const opcodes = opcodeGroups[opcodeGroup];
@@ -53,8 +59,8 @@ let callbacks = 0;
 let ready = false;
 let armed = false;
 const fieldOps = new Set(opcodes || []);
-const readOps = new Set([0x52, 0x53, 0x55, 0x56, 0x57, 0x58,
-  0x60, 0x61, 0x63, 0x64, 0x65, 0x66]);
+const readOps = new Set([0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58,
+  0x60, 0x61, 0x62, 0x63, 0x64, 0x65, 0x66]);
 // The first continuation after a field access may be a move, nop, or return.
 // A larger watcher must subscribe to every opcode or a shared dispatch edge.
 
@@ -144,11 +150,24 @@ function selectFieldSites(data, selectors) {
         allPrimitives: [
           ['int','wide','boolean','byte','char','short'],
           ['I','F','J','D','Z','B','C','S']
+        ],
+        allFields: [
+          ['int','wide','object','boolean','byte','char','short'],
+          ['I','F','J','D','Z','B','C','S']
         ]
       }[opcodeGroup];
+      const variant = opcode>=0x52 && opcode<=0x58 ? opcode-0x52 :
+        opcode>=0x59 && opcode<=0x5f ? opcode-0x59 :
+        opcode>=0x60 && opcode<=0x66 ? opcode-0x60 :
+        opcode>=0x67 && opcode<=0x6d ? opcode-0x67 : -1;
+      const actualKind=['int','wide','object','boolean','byte','char','short'][variant];
+      const descriptorOk=field.valueKind==='object'
+        ? typeof field.fieldType==='string' &&
+          /^(?:L[^;]+;|\[+(?:[ZBCSIFJD]|L[^;]+;))$/.test(field.fieldType)
+        : expected && expected[1].includes(field.fieldType);
       if (!fieldOps.has(opcode) || !expected ||
           !expected[0].includes(field.valueKind) ||
-          !expected[1].includes(field.fieldType))
+          actualKind!==field.valueKind || !descriptorOk)
         continue;
       const identity=[field.methodClass,field.methodName,field.fieldName].join('\0');
       if (identities !== null && !identities.has(identity)) continue;
@@ -168,6 +187,13 @@ function selectFieldSites(data, selectors) {
       if (!src || src.methodClass !== field.methodClass ||
           src.methodName !== field.methodName)
         throw new Error('Missing method instruction stream for field');
+      // Nterp places the GC-updated reference vreg array immediately
+      // below its ordinary 32-bit vreg array. A reference field must
+      // have the actual registers_size from its verified packaged DEX.
+      if (field.valueKind==='object' &&
+          (!Number.isInteger(src.registersSize) ||
+           src.registersSize<1 || src.registersSize>65535))
+        throw new Error('Object field requires verified DEX registers_size');
       let group=methods.get(field.methodIndex);
       if (!group) { group=[];methods.set(field.methodIndex,group); }
       let method=group.find(m=>m.dexId===dex.dexId);
@@ -177,7 +203,8 @@ function selectFieldSites(data, selectors) {
           codeBytes[i]=Number.parseInt(src.insnsHex.slice(2*i,2*i+2),16);
         method={methodIndex:field.methodIndex,dexId:dex.dexId,
           dexSha256:dex.sha256,methodClass:field.methodClass,
-          methodName:field.methodName,codeBytes,sites:new Map()};
+          methodName:field.methodName,registersSize:src.registersSize,
+          codeBytes,sites:new Map()};
         group.push(method);
       }
       const p=field.dexPc*2;
@@ -192,6 +219,7 @@ function selectFieldSites(data, selectors) {
         fieldType:field.fieldType,opcode,kind,fieldId:field.fieldIndex,
         methodIndex:field.methodIndex,dexPc:field.dexPc,
         dexId:dex.dexId,dexSha256:dex.sha256,
+        registersSize:src.registersSize,
         sourceFile:field.sourceFile ?? null,
         sourceLine:field.sourceLine ?? null
       });
@@ -205,7 +233,7 @@ function selectFieldSites(data, selectors) {
   return {methods,count};
 }
 function install() {
-  if (opcodeGroup !== 'allPrimitives' || !profile ||
+  if (!['allPrimitives','allFields'].includes(opcodeGroup) || !profile ||
       profile.api !== 33 || profile.architecture !== 'x86_64' ||
       Process.arch !== 'x64' || Process.pointerSize !== 8 ||
       profile.handlerSize !== 128 || profile.opcodeCount !== 256)
@@ -300,8 +328,17 @@ function install() {
     return match.site;
   }
 
-  function readVreg(frame,vreg,descriptor) {
+  function readVreg(frame,vreg,descriptor,registersSize) {
     const slot=frame.add(vreg*4);
+    if (descriptor.startsWith('L') || descriptor.startsWith('[')) {
+      if (!Number.isInteger(registersSize) || vreg>=registersSize)
+        throw new Error('Object vreg is outside exact DEX register array');
+      // ART's reference array is GC-scanned and updated during moving
+      // collection. Capture only the 32-bit slot bits at this instant;
+      // DO NOT dereference, retain, or interpret as a stable JNI handle.
+      const rootSlot=frame.sub(registersSize*4).add(vreg*4);
+      return '0x'+rootSlot.readU32().toString(16).padStart(8,'0');
+    }
     if (descriptor==='J' || descriptor==='D') {
       const lo=slot.readU32().toString(16).padStart(8,'0');
       const hi=slot.add(4).readU32().toString(16).padStart(8,'0');
@@ -318,14 +355,16 @@ function install() {
   function representation(descriptor) {
     return {I:'signed-int32',F:'raw-u32-ieee754',J:'raw-u64-le',
       D:'raw-u64-ieee754',Z:'unsigned-boolean-byte',B:'signed-int8',
-      C:'unsigned-int16',S:'signed-int16'}[descriptor];
+      C:'unsigned-int16',S:'signed-int16'}[descriptor] ||
+      ((descriptor.startsWith('L') || descriptor.startsWith('['))
+        ? 'raw-nterp-gc-root-u32-ephemeral' : undefined);
   }
   function complete(p,ctx) {
     if (!p.sampled) return;
     completedHits++;
     const f=p.sampled;
     const value=f.kind===1 ?
-      readVreg(ctx.r13,f.vreg,f.fieldType) : f.preValue;
+      readVreg(ctx.r13,f.vreg,f.fieldType,f.registersSize) : f.preValue;
     if (records.length>=MAX_RECORDS) {dropped++;return;}
     if (records.length<8)
       send({type:'artwatch-nterp-software-record-sample',
@@ -341,7 +380,11 @@ function install() {
       runtimeMethodAddress:p.method.toString(),
       sourceFile:f.sourceFile,sourceLine:f.sourceLine,
       opcode:f.opcode,kind:f.kind,value,instructionAddress:p.pc.toString(),
-      provenance:'nterp Stalker opcode callout and succeeding opcode'
+      provenance:'nterp Stalker opcode callout and succeeding opcode',
+      ...(f.fieldType.startsWith('L') || f.fieldType.startsWith('[')
+        ? {referenceIsNull:value==='0x00000000',
+           referenceSnapshotGcStable:false,
+           referenceScope:'single-nterp-opcode-completion'} : {})
     });
   }
   function opcodeEnter(ctx,opcode) {
@@ -368,7 +411,8 @@ function install() {
         (ctx.rbx.toUInt32()&255)===high) {
       const vreg=opcode>=0x60 ? high : high&15;
       sampled={...target,vreg,
-        preValue:target.kind===2 ? readVreg(fp,vreg,target.fieldType) : null};
+        preValue:target.kind===2 ?
+          readVreg(fp,vreg,target.fieldType,target.registersSize) : null};
       fieldHits++;
     }
     if (sampled)
