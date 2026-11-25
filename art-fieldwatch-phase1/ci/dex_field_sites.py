@@ -135,12 +135,31 @@ class Dex:
         return {"fieldIndex":i,"declaringClass":self.typ(u16(self.data,pos)),
                 "fieldType":self.typ(u16(self.data,pos+2)),
                 "fieldName":self.string(u32(self.data,pos+4))}
+    def prototype(self,i):
+        if i>=self.protos_count:
+            raise ValueError("Prototype ID out of bounds")
+        pos=self.protos_off+12*i
+        result=self.typ(u32(self.data,pos+4))
+        params_off=u32(self.data,pos+8)
+        params=[]
+        if params_off:
+            if params_off>len(self.data)-4:
+                raise ValueError("Prototype parameters out of bounds")
+            count=u32(self.data,params_off)
+            if count>(len(self.data)-params_off-4)//2:
+                raise ValueError("Prototype parameter list truncated")
+            for k in range(count):
+                params.append(self.typ(u16(self.data,params_off+4+2*k)))
+        return "("+"".join(params)+")"+result
+
     def method(self,i):
         if i>=self.methods_count: raise ValueError("method ID out of bounds")
         pos=self.methods_off+8*i
+        proto=u16(self.data,pos+2)
         return {"methodIndex":i,"methodClass":self.typ(u16(self.data,pos)),
                 "methodName":self.string(u32(self.data,pos+4)),
-                "prototypeIndex":u16(self.data,pos+2)}
+                "prototypeIndex":proto,
+                "methodPrototype":self.prototype(proto)}
     def sites(self):
         out=[]
         self.fixture_methods=[]
@@ -274,6 +293,36 @@ def inventory(apk):
                 "dexFiles":dex_files,"fixtureMethods":fixture_methods}
 
 def self_test():
+    # Build minimal bounded DEX ID tables to exercise actual proto_id
+    # parsing. Both overloaded methods share a name but have distinct
+    # (I)V versus (J)V descriptors and method indices.
+    synthetic=bytearray(0x240)
+    synthetic[:8]=b"dex\n035\0"
+    for off,count,table_off in ((0x38,5,0x80),(0x40,4,0xa0),
+                                (0x48,2,0xb0),(0x58,2,0xc8)):
+        struct.pack_into("<II",synthetic,off,count,table_off)
+    values=("Lcom/example/Target;","V","I","J","overloaded")
+    cursor=0x100
+    for i,value in enumerate(values):
+        struct.pack_into("<I",synthetic,0x80+4*i,cursor)
+        encoded=value.encode("ascii")
+        synthetic[cursor:cursor+len(encoded)+2]=bytes([len(value)])+encoded+b"\0"
+        cursor+=len(encoded)+2
+    for i in range(4):
+        struct.pack_into("<I",synthetic,0xa0+4*i,i)
+    struct.pack_into("<III",synthetic,0xb0,0,1,0xd8)
+    struct.pack_into("<III",synthetic,0xbc,0,1,0xe0)
+    struct.pack_into("<IH",synthetic,0xd8,1,2)
+    struct.pack_into("<IH",synthetic,0xe0,1,3)
+    struct.pack_into("<HHI",synthetic,0xc8,0,0,4)
+    struct.pack_into("<HHI",synthetic,0xd0,0,1,4)
+    indexed=Dex(bytes(synthetic),"synthetic.dex")
+    assert indexed.method(0)["methodPrototype"]=="(I)V"
+    assert indexed.method(1)["methodPrototype"]=="(J)V"
+    synthetic[0xd8:0xdc]=b"\xff"*4
+    try:Dex(bytes(synthetic),"bad.dex").prototype(0)
+    except ValueError:pass
+    else:raise AssertionError("Out-of-bounds prototype params accepted")
     assert FIELD_OPS[0x52]=={"access":"instance","operation":"read","valueKind":"int"}
     assert FIELD_OPS[0x5a]["valueKind"]=="wide"
     assert FIELD_OPS[0x60]["access"]=="static"

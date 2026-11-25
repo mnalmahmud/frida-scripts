@@ -1037,3 +1037,57 @@ preserves identity without assuming that a method index is globally
 unique across different DexFiles. It does not currently attest
 runtime class-loader ownership or code loaded after catalog creation:
 byte-equivalent candidate collisions fail closed where detectable.
+
+## Exact DEX method prototypes and overloaded-method selectors
+
+The field catalog now includes the complete DEX method prototype,
+`(parameterDescriptor...)returnDescriptor`, obtained directly
+from `proto_id_item` and the type list in the installed DEX bytes.
+Field access records preserve `methodPrototype` next to the
+declaring class, method name, field ID, and DEX PC.
+
+A field selector may optionally include this method prototype to
+distinguish overloaded methods with the same name and field access:
+
+```sh
+python3 art-fieldwatch-phase1/watch.py \
+  --apk base.apk --profile nterp-profile.json \
+  --process com.example.app --thread Worker \
+  --field 'Lcom/example/Worker;#update(I)V#counter'
+```
+
+The old unqualified `Class#method#field` selector remains valid,
+and matches all overloads. Runtime attribution still requires an
+unambiguous full DEX byte-stream match for each ArtMethod.
+
+## Automated ART profile verification and observation report
+
+Instead of providing a saved JSON profile, pass `--auto-profile` to
+have the host query Android's API/ABI over adb, pull the device's
+installed libart.so from an APEX or system library path, and validate
+its exact build ID, ELF architecture, and nterp table symbol bounds.
+Only allowlisted ART binaries are accepted. This never guesses a
+nterp handler address or modifies a system image.
+
+The optional `--coverage-output observed.json` produces a per-site
+count for every field instruction from the selected packaged DEX
+catalog, with dexLocation, class, full method prototype, field,
+opcode and DEX PC. Its explicit scope is **sites observed in nterp**.
+A zero count cannot distinguish unexecuted code from an execution
+handled by compiled JIT/AOT, JNI, or another interpreter, and is not
+a claim of missed instrumentation or complete program coverage.
+
+## Live overloaded-method attribution regression
+
+The release APK has separate `overloadedWrite` and `overloadedRead`
+Java methods taking either an `int` or a `long` argument. The
+field names, declaring class, and method names deliberately overlap,
+but the packaged DEX method prototypes and method IDs differ. A
+strict on-device Stalker test selects all four exact prototypes and
+checks 512 ordered real field operations with two distinct value
+ranges, matching live ArtMethod and DEX-PC identities. Both the
+API33 and API34 x86_64 non-debuggable release jobs run this oracle.
+
+The runtime event record includes `methodPrototype`, while an
+unqualified `Class#method#field` selector remains a deliberate
+wildcard across overloads.

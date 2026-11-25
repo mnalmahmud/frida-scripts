@@ -111,6 +111,11 @@ if [[ "$variant" == release && "${ARTWATCH_SHADOW_SHIM:-0}" == 1 ]]; then
   ARTWATCH_NTERP_GROUP=allPrimitives ARTWATCH_NTERP_BACKEND=software \
     ARTWATCH_NTERP_WORKLOAD=parallel \
     python3 art-fieldwatch-phase1/ci/run-nterp-smoke.py
+  # Resolve overloaded methods by full packaged DEX prototypes, not names.
+  adb shell am force-stop com.example.artfieldwatch
+  ARTWATCH_NTERP_GROUP=allPrimitives ARTWATCH_NTERP_BACKEND=software \
+    ARTWATCH_NTERP_WORKLOAD=overload \
+    python3 art-fieldwatch-phase1/ci/run-nterp-smoke.py
 fi
 
 # Portability gate: stock API34 x86_64 has a distinct audited libart build.
@@ -123,5 +128,9 @@ if [[ "$variant" == release && "${ARTWATCH_NTERP_ONLY:-0}" == 1 ]]; then
     python3 art-fieldwatch-phase1/ci/run-nterp-smoke.py
   adb shell am force-stop com.example.artfieldwatch
   ARTWATCH_NTERP_GROUP=allFields ARTWATCH_NTERP_BACKEND=software \
+    python3 art-fieldwatch-phase1/ci/run-nterp-smoke.py
+  adb shell am force-stop com.example.artfieldwatch
+  ARTWATCH_NTERP_GROUP=allPrimitives ARTWATCH_NTERP_BACKEND=software \
+    ARTWATCH_NTERP_WORKLOAD=overload \
     python3 art-fieldwatch-phase1/ci/run-nterp-smoke.py
 fi

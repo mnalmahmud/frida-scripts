@@ -17,6 +17,38 @@ public final class NoTemplateTarget {
     receiver.value = x;
   }
 
+  // Deliberately overloaded names accessing the same field. The DEX
+  // prototype, not just method name, is needed for exact selection.
+  public static void overloadedWrite(NoTemplateTarget receiver, int x) {
+    receiver.value = x;
+  }
+  public static void overloadedWrite(NoTemplateTarget receiver, long x) {
+    receiver.value = (int)x;
+  }
+  public static int overloadedRead(NoTemplateTarget receiver, int ignored) {
+    return receiver.value;
+  }
+  public static int overloadedRead(NoTemplateTarget receiver, long ignored) {
+    return receiver.value;
+  }
+
+  public static int exerciseOverloaded() {
+    NoTemplateTarget receiver = new NoTemplateTarget();
+    int checksum = 0;
+    for (int i = 0; i < 128; i++) {
+      overloadedWrite(receiver, 100+i);
+      int first = overloadedRead(receiver, i);
+      overloadedWrite(receiver, (long)(-200-i));
+      int second = overloadedRead(receiver, (long)i);
+      if (first != 100+i || second != -200-i)
+        throw new AssertionError("Overloaded field method mismatch at "+i);
+      checksum += first + second;
+    }
+    if (checksum != -12800)
+      throw new AssertionError("Overloaded field checksum mismatch");
+    return checksum;
+  }
+
   public static int readInstance(NoTemplateTarget receiver) {
     return receiver.value;
   }

@@ -16,14 +16,17 @@ import argparse
 import copy
 import json
 import os
+import re
+import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / "ci"))
 from dex_field_sites import inventory  # noqa: E402
-from nterp_profile import EXPECTED_BUILD_ID, KNOWN_BUILD_IDS  # noqa: E402
+from nterp_profile import EXPECTED_BUILD_ID, KNOWN_BUILD_IDS, resolve  # noqa: E402
 
 PROVENANCE = "live instruction base verified against packaged DEX bytes"
 
@@ -36,8 +39,21 @@ def parse_selector(text):
             "/" not in parts[0] or len(text) > 1024):
         raise ValueError(
             "Field selector must be 'Lpackage/Owner;#methodName#fieldName'")
-    return {"methodClass":parts[0], "methodName":parts[1],
-            "fieldName":parts[2]}
+    method = parts[1]
+    proto = None
+    if "(" in method:
+        pos = method.index("(")
+        proto = method[pos:]
+        method = method[:pos]
+        if not method or not re.fullmatch(r"\([^)]*\).+", proto):
+            raise ValueError("Invalid method prototype in field selector")
+    elif ")" in method:
+        raise ValueError("Unexpected closing method prototype")
+    result = {"methodClass":parts[0], "methodName":method,
+              "fieldName":parts[2]}
+    if proto is not None:
+        result["methodPrototype"] = proto
+    return result
 
 
 def verify_profile(profile):
@@ -53,6 +69,44 @@ def verify_profile(profile):
             profile["endOffset"] - profile["startOffset"] != 32768):
         raise ValueError("Unsupported ART profile; no address guesses permitted")
     return profile
+
+
+def discover_device_profile(adb="adb", readelf="readelf"):
+    """Verify the installed ART ELF using the device's actual binary.
+
+    No guessed offsets: the ELF build ID, machine, symbol table, and exact
+    nterp handler-table span must all pass the same standalone resolver.
+    """
+    def prop(name):
+        result=subprocess.run([adb,"shell","getprop",name],
+                              check=True,capture_output=True,text=True,
+                              timeout=20)
+        return result.stdout.strip()
+    sdk=prop("ro.build.version.sdk")
+    abi=prop("ro.product.cpu.abi")
+    if not sdk.isdigit() or int(sdk) not in KNOWN_BUILD_IDS or abi!="x86_64":
+        raise ValueError(f"No approved nterp profile for SDK={sdk} ABI={abi}")
+    with tempfile.TemporaryDirectory(prefix="artwatch-profile-") as directory:
+        libart=Path(directory)/"libart.so"
+        pulled=False
+        for remote in ("/apex/com.android.art/lib64/libart.so",
+                       "/system/lib64/libart.so"):
+            try:
+                subprocess.run([adb,"pull",remote,str(libart)],
+                               check=True,capture_output=True,text=True,
+                               timeout=60)
+                if libart.is_file() and libart.stat().st_size>4096:
+                    pulled=True
+                    break
+            except (subprocess.CalledProcessError,subprocess.TimeoutExpired):
+                continue
+        if not pulled:
+            raise ValueError("Failed to retrieve the installed ART ELF")
+        def elf(*options):
+            return subprocess.check_output([readelf,*options,str(libart)],
+                                           text=True,timeout=30)
+        return verify_profile(resolve(elf("--wide","-Ws"),
+                                      elf("-n"),elf("-h"),api=int(sdk)))
 
 
 def inventory_packages(apks, loader=inventory):
@@ -100,18 +154,23 @@ def select_catalog(catalog, selectors):
     result = copy.deepcopy(catalog)
     if selectors is None:
         return result
-    wanted = {(s["methodClass"], s["methodName"], s["fieldName"])
-              for s in selectors}
+    wanted = {(s["methodClass"], s["methodName"], s["fieldName"],
+               s.get("methodPrototype")) for s in selectors}
     matched = set()
     for dex in result["dexFiles"]:
         accesses = []
         used = set()
         for site in dex["fieldAccesses"]:
-            key = (site["methodClass"], site["methodName"],
-                   site["fieldName"])
-            if key not in wanted:
+            prefix = (site["methodClass"], site["methodName"],
+                      site["fieldName"])
+            wildcard = (*prefix, None)
+            specific = (*prefix, site.get("methodPrototype"))
+            if wildcard not in wanted and specific not in wanted:
                 continue
-            matched.add(key)
+            if wildcard in wanted:
+                matched.add(wildcard)
+            if specific in wanted:
+                matched.add(specific)
             accesses.append(site)
             used.add(site["methodIndex"])
         dex["fieldAccesses"] = accesses
@@ -124,6 +183,60 @@ def select_catalog(catalog, selectors):
                          repr(sorted(wanted-matched)))
     result["totalFieldSites"] = sum(dex["count"] for dex in result["dexFiles"])
     return result
+
+
+class CoverageTracker:
+    """Report observed nterp sites without claiming executed-code coverage."""
+    def __init__(self,catalog,include_object=True):
+        self.entries={}
+        for dex in catalog["dexFiles"]:
+            for site in dex["fieldAccesses"]:
+                if not include_object and site["valueKind"]=="object":
+                    continue
+                key=(dex["dexId"],site["methodIndex"],
+                     site["dexPc"],site["fieldIndex"])
+                if key in self.entries:
+                    raise ValueError("Duplicate catalog field site: "+repr(key))
+                self.entries[key]={
+                    "dexId":dex["dexId"],"dexName":dex.get("name"),
+                    "dexLocation":dex.get("dexLocation",dex.get("name")),
+                    "methodClass":site["methodClass"],
+                    "methodName":site["methodName"],
+                    "methodPrototype":site.get("methodPrototype"),
+                    "fieldName":site["fieldName"],"fieldType":site["fieldType"],
+                    "fieldIndex":site["fieldIndex"],"methodIndex":site["methodIndex"],
+                    "dexPc":site["dexPc"],"opcode":site["opcode"],
+                    "observedCount":0
+                }
+        self.total_events=0
+
+    def observe(self,event):
+        key=(event["dexId"],event["methodIndex"],
+             event["dexPc"],event["fieldIndex"])
+        site=self.entries.get(key)
+        if site is None:
+            raise RuntimeError("Event refers to a site outside verified APK catalog")
+        if int(site["opcode"],16)!=event["opcode"] or (
+                site["fieldType"]!=event["fieldType"]):
+            raise RuntimeError("Field opcode or descriptor differs from catalog")
+        site["observedCount"]+=1
+        self.total_events+=1
+
+    def report(self):
+        seen=sum(site["observedCount"]>0 for site in self.entries.values())
+        return {
+            "schemaVersion":1,
+            "scope":"observed-nterp-site-only; not executed-code coverage",
+            "limitations":("Non-observation can mean never executed, compiled "
+                "JIT/AOT/native path, unfollowed thread, dynamic DEX, or a "
+                "different ART interpreter; no execution completeness claim"),
+            "totalSelectedSites":len(self.entries),
+            "observedSites":seen,
+            "unobservedSites":len(self.entries)-seen,
+            "observedEvents":self.total_events,
+            "sites":sorted(self.entries.values(),
+                key=lambda x:(x["dexId"],x["methodIndex"],x["dexPc"]))
+        }
 
 
 def assemble_agent(catalog, profile, selectors, thread, group):
@@ -150,8 +263,13 @@ def self_test():
     example = parse_selector("Lcom/example/Foo;#run#count")
     assert example == {"methodClass":"Lcom/example/Foo;",
                        "methodName":"run","fieldName":"count"}
+    overloaded = parse_selector("Lcom/example/Foo;#run(I)J#count")
+    assert overloaded == {**example,"methodPrototype":"(I)J"}
+    assert parse_selector("Lcom/example/Foo;#<init>(Ljava/lang/String;)V#count")[
+        "methodPrototype"] == "(Ljava/lang/String;)V"
     for bad in ("A#b#c","Lfoo;#x#field","Lcom/X;#x",
-                "Lcom/X;#x#","Lcom/X;#x#y#z"):
+                "Lcom/X;#x#","Lcom/X;#x#y#z",
+                "Lcom/X;#run(Invalid#field", "Lcom/X;#run)#x"):
         try:parse_selector(bad)
         except ValueError:pass
         else:raise AssertionError("Invalid field selector accepted: "+bad)
@@ -172,19 +290,45 @@ def self_test():
     dex = {
         "dexId":0,"count":2,
         "fieldAccesses":[
-            {**example,"methodIndex":1,"fieldIndex":2},
+            {**example,"methodIndex":1,"fieldIndex":2,
+             "dexPc":0,"fieldType":"I","valueKind":"int","opcode":"0x59"},
             {"methodClass":"Lcom/example/Other;","methodName":"run",
-             "fieldName":"value","methodIndex":2,"fieldIndex":3}],
+             "fieldName":"value","methodIndex":2,"fieldIndex":3,
+             "dexPc":0,"fieldType":"I","valueKind":"int","opcode":"0x59"}],
         "fieldMethods":[{"methodIndex":1,"registersSize":3},
                         {"methodIndex":2,"registersSize":2}],
     }
     cat = {"schemaVersion":1,"dexFiles":[dex],
            "totalFieldSites":2,"fixtureMethods":[]}
     filtered=select_catalog(cat,[example])
+    tracker=CoverageTracker(filtered)
+    assert tracker.report()["totalSelectedSites"]==1
+    first=filtered["dexFiles"][0]["fieldAccesses"][0]
+    tracker.observe({"dexId":0,"methodIndex":first["methodIndex"],
+                     "dexPc":0,"fieldIndex":first["fieldIndex"],
+                     "opcode":0x59,"fieldType":"I"})
+    assert tracker.report()["observedEvents"]==1
+    assert tracker.report()["observedSites"]==1
+    try: tracker.observe({"dexId":0,"methodIndex":999,
+                          "dexPc":0,"fieldIndex":1,"opcode":0x59,"fieldType":"I"})
+    except RuntimeError:pass
+    else:raise AssertionError("Unknown runtime DEX site accepted")
     assert len(filtered["dexFiles"][0]["fieldAccesses"])==1
     assert len(filtered["dexFiles"][0]["fieldMethods"])==1
     assert cat["totalFieldSites"]==2  # no mutation of caller input
     assert select_catalog(cat,None)["totalFieldSites"]==2
+    overload_cat = copy.deepcopy(cat)
+    overload_cat["dexFiles"][0]["fieldAccesses"][0]["methodPrototype"]="(I)J"
+    overload_cat["dexFiles"][0]["fieldAccesses"].append({
+        **example, "methodPrototype":"(Ljava/lang/String;)J",
+        "methodIndex":3, "fieldIndex":2})
+    overload_cat["dexFiles"][0]["fieldMethods"].append({
+        "methodIndex":3, "registersSize":3})
+    only=select_catalog(overload_cat,[overloaded])
+    assert len(only["dexFiles"][0]["fieldAccesses"])==1
+    assert only["dexFiles"][0]["fieldAccesses"][0]["methodIndex"]==1
+    broad=select_catalog(overload_cat,[example])
+    assert len(broad["dexFiles"][0]["fieldAccesses"])==2
     merged=inventory_packages(["base.apk","split_feature.apk"],
         loader=lambda path: {**cat,"dexFiles":[{**dex,"name":"classes.dex"}]})
     assert len(merged["dexFiles"])==2
@@ -208,8 +352,9 @@ def self_test():
 
 
 def watch(args):
-    if not args.apk or not args.profile or not args.process or not args.thread:
-        raise ValueError("--apk, --profile, --process, and --thread required")
+    if not args.apk or not (args.profile or args.auto_profile) or (
+            not args.process or not args.thread):
+        raise ValueError("Provide --apk, --process, --thread and an ART profile")
     if not args.all_fields and not args.field:
         raise ValueError("Use explicit --field selectors or --all-fields")
     if args.duration < 0 or not 50 <= args.poll_ms <= 5000:
@@ -217,7 +362,8 @@ def watch(args):
     selectors = ([parse_selector(item) for item in args.field]
                  if args.field else None)
     group = "allPrimitives" if args.primitives_only else "allFields"
-    profile = verify_profile(json.loads(args.profile.read_text()))
+    profile = (discover_device_profile() if args.auto_profile else
+               verify_profile(json.loads(args.profile.read_text())))
     catalog = select_catalog(inventory_packages(args.apk), selectors)
     if not catalog["totalFieldSites"]:
         raise ValueError("No field instructions were found in the APK")
@@ -231,10 +377,12 @@ def watch(args):
     script=None
     spawned=None
     resumed=False
+    stopped=False
     errors=[]
     produced=0
     target=args.process if not args.process.isdigit() else int(args.process)
     stream=open(args.output,"w",encoding="utf-8") if args.output else sys.stdout
+    coverage=CoverageTracker(catalog,include_object=not args.primitives_only)
 
     def on_message(message, unused):
         if message.get("type") == "error":
@@ -253,6 +401,7 @@ def watch(args):
             for event in item["events"]:
                 if event.get("dexPcSource") != PROVENANCE:
                     raise RuntimeError("Runtime DEX identity was not verified")
+                coverage.observe(event)
                 stream.write(json.dumps(event,sort_keys=True)+"\n")
                 produced+=1
             stream.flush()
@@ -293,8 +442,16 @@ def watch(args):
                 raise RuntimeError("Frida errors: "+"; ".join(errors))
             if args.max_events and produced>=args.max_events:
                 break
+        # Stop the observer BEFORE the final drain so no completed field
+        # event can arrive after the host believes its JSONL stream ended.
+        cleanup=script.exports_sync.stop()
+        stopped=True
+        if cleanup.get("failures"):
+            raise RuntimeError("Could not stop all followed threads cleanly")
         drain()
         state=script.exports_sync.snapshot()
+        if state.get("totalRecorded")!=produced:
+            raise RuntimeError("Agent/host event count mismatch after final drain")
         print("ART fieldwatch summary: "+json.dumps({
             key:state.get(key) for key in (
                 "threadsFollowed","fieldHits","completedHits",
@@ -303,10 +460,14 @@ def watch(args):
         return 0
     except KeyboardInterrupt:
         if script is not None:
+            cleanup=script.exports_sync.stop()
+            stopped=True
+            if cleanup.get("failures"):
+                raise RuntimeError("Could not stop all followed threads cleanly")
             drain()
         return 0
     finally:
-        if script is not None:
+        if script is not None and not stopped:
             try:script.exports_sync.stop()
             except Exception as e:print("Unable to stop field tracing: "+str(e),
                                      file=sys.stderr)
@@ -318,6 +479,10 @@ def watch(args):
             except Exception:pass
         if stream is not sys.stdout:
             stream.close()
+        if args.coverage_output:
+            args.coverage_output.write_text(
+                json.dumps(coverage.report(),indent=2,sort_keys=True)+"\n",
+                encoding="utf-8")
 
 
 def main():
@@ -325,11 +490,16 @@ def main():
     parser.add_argument("--self-test",action="store_true")
     parser.add_argument("--apk",type=Path,action="append",
                         help="Exact base APK; repeat for split APKs in order")
-    parser.add_argument("--profile",type=Path,help="Pinned nterp ELF profile JSON")
+    profile_args=parser.add_mutually_exclusive_group()
+    profile_args.add_argument("--profile",type=Path,
+                              help="Prevalidated ART nterp ELF profile JSON")
+    profile_args.add_argument("--auto-profile",action="store_true",
+                              help="Pull installed libart ELF and verify its exact ABI")
     parser.add_argument("--process",help="Existing process name/PID or spawn package")
     parser.add_argument("--thread",help="Exact thread name, or * for all threads")
     selection=parser.add_mutually_exclusive_group()
-    selection.add_argument("--field",action="append",help="Class#method#field")
+    selection.add_argument("--field",action="append",
+                           help="Class#method[(paramTypes)returnType]#field")
     selection.add_argument("--all-fields",action="store_true",
                            help="Explicitly select all packaged DEX field sites")
     parser.add_argument("--primitives-only",action="store_true",
@@ -342,6 +512,8 @@ def main():
     parser.add_argument("--max-events",type=int,default=0,
                         help="Stop after at least N events (0 means no cap)")
     parser.add_argument("--output",type=Path,help="Write JSONL instead of stdout")
+    parser.add_argument("--coverage-output",type=Path,
+                        help="Write observed DEX field-site report (not execution coverage)")
     args=parser.parse_args()
     if args.self_test:
         self_test()

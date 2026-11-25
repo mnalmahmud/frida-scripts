@@ -118,8 +118,14 @@ function selectFieldSites(data, selectors) {
          typeof s.methodName !== 'string' ||
          typeof s.fieldName !== 'string')))
     throw new Error('Expected methodClass/methodName/fieldName selectors');
+  if (wanted !== null && wanted.some(s =>
+      s.methodPrototype !== undefined &&
+      (typeof s.methodPrototype !== 'string' ||
+       !/^\([^)]*\).+$/.test(s.methodPrototype))))
+    throw new Error('Invalid optional DEX methodPrototype selector');
   const identities = wanted === null ? null :
-    new Set(wanted.map(s => [s.methodClass,s.methodName,s.fieldName].join('\0')));
+    new Set(wanted.map(s => [s.methodClass,s.methodName,s.fieldName,
+      s.methodPrototype ?? '*'].join('\0')));
   const matched = new Set();
   // A method index is only unique INSIDE its DexFile. Each index maps to
   // candidate methods in different DEXs. Runtime byte validation must select
@@ -175,8 +181,13 @@ function selectFieldSites(data, selectors) {
           !expected[0].includes(field.valueKind) ||
           actualKind!==field.valueKind || !descriptorOk)
         continue;
-      const identity=[field.methodClass,field.methodName,field.fieldName].join('\0');
-      if (identities !== null && !identities.has(identity)) continue;
+      const identity=[field.methodClass,field.methodName,field.fieldName,
+        field.methodPrototype ?? '*'].join('\0');
+      const wildcardIdentity=[field.methodClass,field.methodName,
+        field.fieldName,'*'].join('\0');
+      if (identities !== null &&
+          !identities.has(identity) && !identities.has(wildcardIdentity))
+        continue;
       if (!Number.isInteger(field.methodIndex) || field.methodIndex < 0 ||
           !Number.isInteger(field.fieldIndex) || field.fieldIndex < 0 ||
           !Number.isInteger(field.dexPc) || field.dexPc < 0 ||
@@ -191,8 +202,9 @@ function selectFieldSites(data, selectors) {
         throw new Error('Field opcode metadata disagrees with DEX semantics');
       const src=sources.get(field.methodIndex);
       if (!src || src.methodClass !== field.methodClass ||
-          src.methodName !== field.methodName)
-        throw new Error('Missing method instruction stream for field');
+          src.methodName !== field.methodName ||
+          src.methodPrototype !== field.methodPrototype)
+        throw new Error('Missing exact method/prototype instruction stream');
       // Nterp places the GC-updated reference vreg array immediately
       // below its ordinary 32-bit vreg array. A reference field must
       // have the actual registers_size from its verified packaged DEX.
@@ -209,7 +221,8 @@ function selectFieldSites(data, selectors) {
           codeBytes[i]=Number.parseInt(src.insnsHex.slice(2*i,2*i+2),16);
         method={methodIndex:field.methodIndex,dexId:dex.dexId,
           dexSha256:dex.sha256,methodClass:field.methodClass,
-          methodName:field.methodName,registersSize:src.registersSize,
+          methodName:field.methodName,methodPrototype:field.methodPrototype ?? null,
+          registersSize:src.registersSize,
           codeBytes,sites:new Map()};
         group.push(method);
       }
@@ -221,6 +234,7 @@ function selectFieldSites(data, selectors) {
         throw new Error('DEX opcode site disagrees with exact method bytes');
       method.sites.set(field.dexPc,{
         name:field.methodName,methodClass:field.methodClass,
+        methodPrototype:field.methodPrototype ?? null,
         declaringClass:field.declaringClass,fieldName:field.fieldName,
         fieldType:field.fieldType,opcode,kind,fieldId:field.fieldIndex,
         methodIndex:field.methodIndex,dexPc:field.dexPc,
@@ -231,7 +245,10 @@ function selectFieldSites(data, selectors) {
         sourceFile:field.sourceFile ?? null,
         sourceLine:field.sourceLine ?? null
       });
-      if (identities !== null) matched.add(identity);
+      if (identities !== null) {
+        if (identities.has(identity)) matched.add(identity);
+        if (identities.has(wildcardIdentity)) matched.add(wildcardIdentity);
+      }
       count++;
     }
   }
@@ -380,6 +397,7 @@ function install() {
         number:nextSequence+1,method:f.name,value});
     records.push({
       seq:++nextSequence,threadId:p.threadId,method:f.name,
+      methodPrototype:f.methodPrototype,
       methodClass:f.methodClass,declaringClass:f.declaringClass,
       fieldName:f.fieldName,fieldType:f.fieldType,
       valueRepresentation:representation(f.fieldType),

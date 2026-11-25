@@ -796,6 +796,78 @@ def object_self_test():
     print("nterp transient GC-root reference event verifier self-test passed")
 
 
+def overloaded_prototypes():
+    target="Lcom/example/artfieldwatch/NoTemplateTarget;"
+    return (
+        ("overloadedWrite",f"({target}I)V",0x59,2),
+        ("overloadedRead", f"({target}I)I",0x52,1),
+        ("overloadedWrite",f"({target}J)V",0x59,2),
+        ("overloadedRead", f"({target}J)I",0x52,1)
+    )
+
+
+def verify_overloaded(catalog, result):
+    if (result.get("ready") is not True or
+            result.get("mode") != "stalker-callout" or
+            result.get("errors") or result.get("dropped") or
+            result.get("unverifiedSites") or result.get("pending")):
+        raise AssertionError("Overloaded method nterp experiment unavailable")
+    if len(catalog["dexFiles"])!=1:
+        raise AssertionError("Overloaded fixture expects exactly one DEX")
+    dex=catalog["dexFiles"][0]
+    expected=overloaded_prototypes()
+    methods=[]
+    for name,proto,opcode,kind in expected:
+        candidates=[f for f in dex["fieldAccesses"]
+                    if f["methodName"]==name and
+                    f["methodPrototype"]==proto and
+                    f["methodClass"]=="Lcom/example/artfieldwatch/NoTemplateTarget;"]
+        if len(candidates)!=1 or candidates[0]["fieldName"]!="value" or (
+                int(candidates[0]["opcode"],16)!=opcode):
+            raise AssertionError(f"Missing exact overload DEX field: {name}{proto}")
+        methods.append(candidates[0])
+    if len({m["methodIndex"] for m in methods})!=4:
+        raise AssertionError("Overloaded methods did not retain four method IDs")
+    events=result["events"]
+    if len(events)!=512 or result.get("fieldHits")!=512 or (
+            result.get("completedHits")!=512):
+        raise AssertionError("Overloaded nterp run did not capture 512 field ops")
+    live_methods={}
+    for i in range(128):
+        for j,(name,proto,opcode,kind) in enumerate(expected):
+            e=events[4*i+j]
+            m=methods[j]
+            value=(100+i) if j<2 else (-200-i)
+            attrs={
+                "seq":4*i+j+1,"method":name,"methodPrototype":proto,
+                "methodClass":m["methodClass"],
+                "declaringClass":m["declaringClass"],
+                "fieldName":"value","fieldType":"I",
+                "valueRepresentation":"signed-int32",
+                "methodIndex":m["methodIndex"],
+                "fieldIndex":m["fieldIndex"],"dexPc":m["dexPc"],
+                "opcode":opcode,"kind":kind,"value":value,
+                "dexId":dex["dexId"],"dexSha256":dex["sha256"],
+                "dexPcSource":"live instruction base verified against packaged DEX bytes"
+            }
+            for key,want in attrs.items():
+                if e.get(key)!=want:
+                    raise AssertionError(
+                        f"Overload event i={i} j={j} {key}: {e.get(key)!r} != {want!r}")
+            method=e.get("runtimeMethodAddress")
+            instruction=e.get("instructionAddress")
+            if not method or not instruction:
+                raise AssertionError("Overload event is missing ArtMethod or instruction")
+            identity=(e["dexId"],e["methodIndex"])
+            current=(method,int(instruction,16)-2*e["dexPc"])
+            previous=live_methods.setdefault(identity,current)
+            if previous!=current:
+                raise AssertionError("Overload ArtMethod/Dex PC mapping changed")
+    if result.get("verifiedRuntimeMethods")!=4:
+        raise AssertionError("Overloaded DEX ArtMethod cache count mismatch")
+    print("PASS: 512 exact nterp field accesses in four overloaded Java methods")
+
+
 def verify_parallel(catalog, result):
     """Validate two concurrently followed workers using one field pair.
 
@@ -941,15 +1013,20 @@ def main():
     if backend not in ("hardware", "software") or (
             (backend == "software") != (opcode_group in ("allPrimitives","allFields"))):
         raise RuntimeError("allPrimitives requires the isolated software backend")
-    if workload not in ("default","parallel") or (
-            workload == "parallel" and backend != "software"):
+    if workload not in ("default","parallel","overload") or (
+            workload != "default" and backend != "software"):
         raise RuntimeError("Parallel workload requires software Stalker")
     out = Path(os.environ.get("ARTWATCH_LOG_DIR", "/tmp/artwatch-logs"))
     profile = json.loads((out / "nterp-profile.json").read_text())
     catalog = json.loads((out / "field-sites-release.json").read_text())
     # Explicit selection is test-only. The probe itself consumes arbitrary
     # exact field-site selectors from a packaged single-DEX catalog.
-    if workload == "parallel":
+    if workload == "overload":
+        selected=[{
+            "methodClass":"Lcom/example/artfieldwatch/NoTemplateTarget;",
+            "methodName":name,"methodPrototype":proto,"fieldName":"value"
+        } for name,proto,_,_ in overloaded_prototypes()]
+    elif workload == "parallel":
         selected=[{
             "methodClass":"Lcom/example/artfieldwatch/NoTemplateTarget;",
             "methodName":name,"fieldName":"value"
@@ -1096,7 +1173,7 @@ def main():
             raise AssertionError("nterp probe initialization failed")
         if results["script"].exports_sync.arm() is not True:
             raise AssertionError("Could not arm nterp opcode recorder")
-        trigger = "parallel" if workload == "parallel" else "run"
+        trigger = workload if workload != "default" else "run"
         run_result = subprocess.run(
             ["adb", "shell", "am", "start", "-W", "-n", ACTIVITY,
              "--ez", trigger, "true"],
@@ -1136,6 +1213,8 @@ def main():
         done = False
         expected_done = ("NTERP_LAB_PARALLEL_DONE checks=256 checksum=4116352"
                          if workload == "parallel" else
+                         "NTERP_LAB_OVERLOAD_DONE checks=256 checksum=-12800"
+                         if workload == "overload" else
                          "NTERP_LAB_DONE checksum=-16768 nullChecks=2")
         deadline = time.monotonic() + (90 if backend == "software" else 20)
         while time.monotonic() < deadline:
@@ -1152,7 +1231,7 @@ def main():
             # completion, leaving a 90-second timeout almost opaque.
             try:
                 stalled = results["script"].exports_sync.snapshot()
-                (out / f"nterp-{opcode_group}{'-parallel' if workload == 'parallel' else ''}-timeout-snapshot.json").write_text(
+                (out / f"nterp-{opcode_group}{('-'+workload) if workload != 'default' else ''}-timeout-snapshot.json").write_text(
                     json.dumps(stalled, indent=2))
                 trace.append("probe timeout snapshot: " + json.dumps({
                     k:v for k,v in stalled.items() if k != "events"}))
@@ -1160,12 +1239,14 @@ def main():
                 trace.append("probe timeout snapshot unavailable: " + str(e))
             raise AssertionError("Synthetic field workload did not finish")
         snapshot = results["script"].exports_sync.snapshot()
-        (out / f"nterp-{opcode_group}{'-parallel' if workload == 'parallel' else ''}-runtime-events.json").write_text(
+        (out / f"nterp-{opcode_group}{('-'+workload) if workload != 'default' else ''}-runtime-events.json").write_text(
             json.dumps(snapshot, indent=2))
-        (out / f"nterp-{opcode_group}{'-parallel' if workload == 'parallel' else ''}-probe-messages.json").write_text(
+        (out / f"nterp-{opcode_group}{('-'+workload) if workload != 'default' else ''}-probe-messages.json").write_text(
             json.dumps(events, indent=2))
         if workload == "parallel":
             verify_parallel(catalog,snapshot)
+        elif workload == "overload":
+            verify_overloaded(catalog,snapshot)
         elif opcode_group == "allFields":
             verify_all_fields(catalog,snapshot)
         elif opcode_group == "allPrimitives":
@@ -1200,11 +1281,11 @@ def main():
             results["session"].detach()
         for worker in joined:
             worker.join(timeout=5)
-        (out / f"nterp-{opcode_group}{'-parallel' if workload == 'parallel' else ''}-host-trace.txt").write_text("\\n".join(trace + errors) + "\\n")
+        (out / f"nterp-{opcode_group}{('-'+workload) if workload != 'default' else ''}-host-trace.txt").write_text("\\n".join(trace + errors) + "\\n")
         try:
             log_all = subprocess.check_output(
                 ["adb", "logcat", "-d", "-t", "2500"], text=True)
-            (out / f"nterp-{opcode_group}{'-parallel' if workload == 'parallel' else ''}-logcat-tail.txt").write_text(log_all)
+            (out / f"nterp-{opcode_group}{('-'+workload) if workload != 'default' else ''}-logcat-tail.txt").write_text(log_all)
         except Exception as e:
             trace.append(str(e))
     if errors:

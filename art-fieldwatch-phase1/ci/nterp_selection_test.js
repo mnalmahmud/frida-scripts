@@ -111,6 +111,36 @@ const wideDex={...dex,fieldAccesses:wideFields,
 assert.equal(selectWide({dexFiles:[wideDex]}).count,4);
 assert.equal(selectAll({dexFiles:[wideDex]}).count,4);
 assert.equal(selectAll({dexFiles:[floatDex]}).count,5);
+const overloaded = [
+  {...fields[0],methodIndex:70,methodName:'overloaded',
+   fieldName:'payload',fieldIndex:5,methodPrototype:'(I)V'},
+  {...fields[0],methodIndex:71,methodName:'overloaded',
+   fieldName:'payload',fieldIndex:5,methodPrototype:'(J)V'}
+];
+const overloadedDex={...dex,fieldAccesses:overloaded,
+  fieldMethods:overloaded.map(f=>({
+    methodIndex:f.methodIndex,methodClass:f.methodClass,
+    methodName:f.methodName,methodPrototype:f.methodPrototype,
+    insnsSize:2,insnsHex:codeFor(f)
+  }))};
+const overloadSelector=[{
+  methodClass:cls,methodName:'overloaded',fieldName:'payload',
+  methodPrototype:'(J)V'
+}];
+assert.equal(selectAll({dexFiles:[overloadedDex]},overloadSelector).count,1);
+assert.equal(selectAll({dexFiles:[overloadedDex]},[
+  {methodClass:cls,methodName:'overloaded',fieldName:'payload'}
+]).count,2);
+assert.equal(selectAll({dexFiles:[overloadedDex]}).count,2);
+assert.equal(selectAll({dexFiles:[overloadedDex]},overloadSelector)
+  .methods.get(71)[0].sites.get(0).methodPrototype,'(J)V');
+assert.throws(()=>selectAll({dexFiles:[overloadedDex]},[{
+  ...overloadSelector[0],methodPrototype:'not-valid'
+}]));
+assert.throws(()=>selectAll({dexFiles:[overloadedDex]},[{
+  ...overloadSelector[0],methodPrototype:'(F)V'
+}]));
+
 assert.equal(selectAllFields({dexFiles:[floatDex]}).count,5);
 const objectOpcodes=[0x5b,0x69,0x54,0x62];
 const objectNames=['writeInstanceObject','writeStaticObject',

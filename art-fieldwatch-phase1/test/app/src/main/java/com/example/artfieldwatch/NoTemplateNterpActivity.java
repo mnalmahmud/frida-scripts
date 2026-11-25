@@ -61,8 +61,22 @@ public final class NoTemplateNterpActivity extends Activity {
       return;
     }
     final boolean parallel = intent.getBooleanExtra("parallel", false);
-    if ((!intent.getBooleanExtra("run", false) && !parallel) || started) return;
+    final boolean overload = intent.getBooleanExtra("overload", false);
+    if ((!intent.getBooleanExtra("run", false) && !parallel && !overload) ||
+        started) return;
     started = true;
+    if (overload) {
+      new Thread(() -> {
+        try {
+          int checksum = NoTemplateTarget.exerciseOverloaded();
+          Log.i("ARTWATCH_NTERP_LAB",
+                "NTERP_LAB_OVERLOAD_DONE checks=256 checksum=" + checksum);
+        } catch (Throwable e) {
+          Log.e("ARTWATCH_NTERP_LAB", "NTERP_LAB_FAILED", e);
+        }
+      }, "NterpFieldProbe").start();
+      return;
+    }
     if (parallel) {
       parallelGate = new CountDownLatch(1);
       new Thread(() -> {
