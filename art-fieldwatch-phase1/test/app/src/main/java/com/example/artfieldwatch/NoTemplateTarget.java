@@ -108,10 +108,6 @@ public final class NoTemplateTarget {
   public static int exerciseParallelInstance(int worker) {
     NoTemplateTarget receiver = new NoTemplateTarget();
     int checksum = 0;
-    // These remain strongly reachable Java locals. The agent records only
-    // transient GC-root slot bits, not durable object addresses.
-    Object instanceReference = new Object();
-    Object staticReference = new Object();
     for (int i = 0; i < 128; i++) {
       int value = 10000 * (worker + 1) + 17 * i;
       writeInstance(receiver, value);
@@ -127,6 +123,10 @@ public final class NoTemplateTarget {
   public static int exercise() {
     NoTemplateTarget receiver = new NoTemplateTarget();
     int checksum = 0;
+    // Strongly rooted Java locals; the emitted register snapshots are NOT
+    // durable references and are never dereferenced from Frida.
+    Object instanceReference = new Object();
+    Object staticReference = new Object();
     for (int i = 0; i < 128; i++) {
       int instance = 7 + 3 * i;
       int shared = -11 - 5 * i;

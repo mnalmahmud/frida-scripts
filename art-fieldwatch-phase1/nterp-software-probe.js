@@ -43,6 +43,7 @@ let knownHookCount=0;
 const watchedThreadIds = new Set();
 const pendingByThread = new Map();
 const records = [];
+let nextSequence = 0;
 const diagnostics = [];
 const observedThreads = new Map();
 let threadObserver = null;
@@ -366,11 +367,11 @@ function install() {
     const value=f.kind===1 ?
       readVreg(ctx.r13,f.vreg,f.fieldType,f.registersSize) : f.preValue;
     if (records.length>=MAX_RECORDS) {dropped++;return;}
-    if (records.length<8)
+    if (nextSequence<8)
       send({type:'artwatch-nterp-software-record-sample',
-        number:records.length+1,method:f.name,value});
+        number:nextSequence+1,method:f.name,value});
     records.push({
-      seq:records.length+1,threadId:p.threadId,method:f.name,
+      seq:++nextSequence,threadId:p.threadId,method:f.name,
       methodClass:f.methodClass,declaringClass:f.declaringClass,
       fieldName:f.fieldName,fieldType:f.fieldType,
       valueRepresentation:representation(f.fieldType),
@@ -509,7 +510,18 @@ rpc.exports={
     try {Stalker.garbageCollect();} catch(_){}
     watchedThreadIds.clear();
     pendingByThread.clear();
-    return {removed,failures,recorded:records.length};
+    return {removed,failures,recorded:nextSequence};
+  },
+  // Host-side consumers can stream events without overflowing the bounded
+  // 8K pending-record queue. A drain removes only completed records; it never
+  // mutates the global sequence, live Dex bindings, or per-thread pending ops.
+  drain(limit) {
+    const n=(Number.isInteger(limit) && limit>0)
+      ? Math.min(limit,4096) : 1024;
+    const events=records.splice(0,n);
+    return {events,totalRecorded:nextSequence,queued:records.length,
+      dropped,fieldHits,completedHits,unverifiedSites,
+      errors:diagnostics};
   },
   snapshot() {
     return {
@@ -517,7 +529,8 @@ rpc.exports={
       callbacks,fieldHits,completedHits,hardwareHits,
       unverifiedSites,verifiedRuntimeMethods:liveBases.size,
       abandonedFieldAttempts,pending:pendingByThread.size,
-      dropped,events:records,errors:diagnostics,
+      dropped,events:records,totalRecorded:nextSequence,
+      queued:records.length,errors:diagnostics,
       threadsFollowed:followedCount,
       attachedHooks:stalkedThreads.size?knownHookCount:0
     };

@@ -951,3 +951,46 @@ references created within a valid mutator state. Similarly, this
 nterp Stalker backend does not observe field instructions executed
 in compiled JIT/AOT code, alternative ART interpreters, or all
 Android versions and CPU architectures.
+
+## Run the nterp field watcher on a permitted Android application
+
+`watch.py` is a generic (non-fixture-specific) Frida host frontend.
+It indexes the **exact APK DEX bytes**, creates a restricted field-site
+catalog, attaches to the process, arms the same thread-local Stalker
+opcode backend, and streams DEX-attributed JSONL events. The output
+preserves global sequence numbers even when batches are drained.
+
+Requires an authorized Frida connection, the application's matching
+APK, a prevalidated `nterp-profile.json`, and the **exact pinned
+API33 x86_64 libart build**. It rejects a different build ID/API/ISA
+instead of guessing offsets. To inspect a specific field:
+
+```sh
+python3 art-fieldwatch-phase1/watch.py \
+  --apk /path/to/base.apk \
+  --profile /path/to/nterp-profile.json \
+  --process com.example.app \
+  --thread MyWorker \
+  --field 'Lcom/example/Worker;#perform#counter' \
+  --duration 30 --output events.jsonl
+```
+
+To observe all field instructions found in the supplied APK that
+**actually execute in nterp on followed threads**, choose
+`--all-fields` and an explicit `--thread '*'`. The wildcard is
+high-overhead and has not been established to be safe or complete
+for an arbitrary app's main/GC/foreign threads. A field's inclusion
+in the packaged DEX catalog is not proof that it executes; compiled
+and dynamically loaded code remain outside the coverage scope.
+Use `--primitives-only` to exclude object reference snapshots.
+
+The agent's `rpc.exports.drain(limit)` returns a bounded batch and
+preserves a monotonically increasing per-process sequence number,
+so a continuous host can consume more than 8192 operations without
+dropping records due only to the original finite event-array capacity.
+The host treats any dropped event, ambiguous DEX method, or agent
+diagnostic as an error. It never claims that unintercepted compiled
+instructions were observed.
+
+Offline integration validation:
+`python3 art-fieldwatch-phase1/watch.py --self-test`.
