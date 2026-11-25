@@ -1091,3 +1091,24 @@ API33 and API34 x86_64 non-debuggable release jobs run this oracle.
 The runtime event record includes `methodPrototype`, while an
 unqualified `Class#method#field` selector remains a deliberate
 wildcard across overloads.
+
+## End-to-end host CLI release oracle
+
+`ci/run-generic-watch-smoke.py` starts the separate non-debuggable
+fieldwatch Activity process and invokes **the public `watch.py` CLI**,
+using `--auto-profile`, four exact overloaded-method selectors,
+and a 15-second live Frida attachment. Only after the CLI confirms
+that the Stalker observer is armed does the host start the Java
+workload.
+
+The independent oracle reads the emitted JSONL stream and requires
+512 contiguous, exactly attributed read/write field records with
+signed values and full DEX prototypes. It also reads the
+`--coverage-output` report, requiring all four selected sites
+to have been observed exactly 128 times each. Both non-debuggable
+API33 and API34 release jobs include this test; an offline
+`py_compile` gate checks the runner before building an APK.
+
+This verifies the *actual user-facing host tool* rather than
+only embedded synthetic Frida scripts. It does not expand monitoring
+to JIT/AOT/native or unallowlisted ART versions.

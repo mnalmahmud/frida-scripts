@@ -116,6 +116,9 @@ if [[ "$variant" == release && "${ARTWATCH_SHADOW_SHIM:-0}" == 1 ]]; then
   ARTWATCH_NTERP_GROUP=allPrimitives ARTWATCH_NTERP_BACKEND=software \
     ARTWATCH_NTERP_WORKLOAD=overload \
     python3 art-fieldwatch-phase1/ci/run-nterp-smoke.py
+  # Exercise the public CLI with a live device-derived ART ELF profile.
+  adb shell am force-stop com.example.artfieldwatch
+  python3 art-fieldwatch-phase1/ci/run-generic-watch-smoke.py
 fi
 
 # Portability gate: stock API34 x86_64 has a distinct audited libart build.
@@ -133,4 +136,7 @@ if [[ "$variant" == release && "${ARTWATCH_NTERP_ONLY:-0}" == 1 ]]; then
   ARTWATCH_NTERP_GROUP=allPrimitives ARTWATCH_NTERP_BACKEND=software \
     ARTWATCH_NTERP_WORKLOAD=overload \
     python3 art-fieldwatch-phase1/ci/run-nterp-smoke.py
+  # Exercise the public CLI with a live device-derived ART ELF profile.
+  adb shell am force-stop com.example.artfieldwatch
+  python3 art-fieldwatch-phase1/ci/run-generic-watch-smoke.py
 fi
