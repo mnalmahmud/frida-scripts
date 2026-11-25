@@ -93,6 +93,25 @@ public final class NoTemplateTarget {
     return first + second;
   }
 
+  // Concurrent worker fixture. Both workers call the same two real
+  // field-bearing DEX leaf methods, but write separate receiver objects.
+  // Their disjoint value ranges permit an exact per-thread event oracle
+  // without depending on global interleaving order.
+  public static int exerciseParallelInstance(int worker) {
+    NoTemplateTarget receiver = new NoTemplateTarget();
+    int checksum = 0;
+    for (int i = 0; i < 128; i++) {
+      int value = 10000 * (worker + 1) + 17 * i;
+      writeInstance(receiver, value);
+      int observed = readInstance(receiver);
+      if (observed != value)
+        throw new AssertionError("Parallel field mismatch worker=" +
+            worker + " iteration=" + i);
+      checksum += observed;
+    }
+    return checksum;
+  }
+
   public static int exercise() {
     NoTemplateTarget receiver = new NoTemplateTarget();
     int checksum = 0;

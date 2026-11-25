@@ -331,7 +331,7 @@ function install() {
       send({type:'artwatch-nterp-software-record-sample',
         number:records.length+1,method:f.name,value});
     records.push({
-      seq:records.length+1,method:f.name,
+      seq:records.length+1,threadId:p.threadId,method:f.name,
       methodClass:f.methodClass,declaringClass:f.declaringClass,
       fieldName:f.fieldName,fieldType:f.fieldType,
       valueRepresentation:representation(f.fieldType),
@@ -372,7 +372,7 @@ function install() {
       fieldHits++;
     }
     if (sampled)
-      pendingByThread.set(tid,{method,fp,pc,nextPc:pc.add(4),sampled});
+      pendingByThread.set(tid,{threadId:tid,method,fp,pc,nextPc:pc.add(4),sampled});
   }
   const handlerByAddress=new Map(
     Array.from(hookAddresses,([op,address])=>[address.toString(),op]));

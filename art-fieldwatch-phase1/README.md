@@ -884,3 +884,28 @@ interpreter control flow, indirect jumps, and register conventions.
 A targeted worker-thread experiment cannot establish simultaneous
 app-wide coverage, object reference safety, JIT/AOT coverage, or
 support for other ART builds.
+
+
+## Concurrent worker-thread coverage test (2026-11-25)
+
+A separate experimental Stalker release test runs two Java threads
+named \`NterpFieldProbe\` concurrently, with independent receiver
+objects and disjoint 32-bit integer value ranges. A coordinator
+holds both workers on a \`CountDownLatch\` until the host confirms
+\`threadsFollowed==2\` from the Stalker agent, then releases both via
+a separate Activity intent. No method hooks or injected Java event
+recorders are used.
+
+The Stalker agent now tags each event with its actual OS \`threadId\`.
+The test requires 512 successful \`iput\`/\`iget\` accesses overall,
+then checks the 256 read/write records of **each** thread separately,
+with exact values, method identity, DEX PC, and consistent ArtMethod
+bindings. Globally interleaved event sequence numbers must remain
+contiguous, but the verifier makes no assumption about relative
+scheduling or which thread executes an access first. Two actual
+worker TIDs must have been followed. No global ART handler entry
+is patched.
+
+This is a concurrency test scoped to two named threads executing
+a known nterp workload. It does not demonstrate automatic coverage
+of an arbitrary application's UI, GC, JIT or AOT compiled threads.

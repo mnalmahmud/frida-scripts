@@ -604,22 +604,166 @@ def verify_all_primitives(catalog, result):
     print("PASS: 5120 exact primitive field operations in one nterp software-hook pass")
 
 
+
+def verify_parallel(catalog, result):
+    """Validate two concurrently followed workers using one field pair.
+
+    Each worker is identified by a distinct Java value range, not by the
+    order in which thread IDs appear in the globally interleaved trace.
+    """
+    if (result.get("ready") is not True or
+            result.get("mode") != "stalker-callout" or
+            result.get("opcodeGroup") != "allPrimitives" or
+            result.get("errors") or result.get("dropped") or
+            result.get("unverifiedSites") or result.get("pending") or
+            result.get("hardwareHits")):
+        raise AssertionError("Two-thread Stalker backend did not complete cleanly")
+    if result.get("threadsFollowed") != 2:
+        raise AssertionError("Expected two distinct followed worker threads")
+    events=result["events"]
+    if len(events)!=512 or result.get("fieldHits")!=512 or (
+            result.get("completedHits")!=512):
+        raise AssertionError("Expected 512 successful concurrent leaf field events")
+    methods={m["methodName"]:m for m in catalog["fixtureMethods"]}
+    if not {"writeInstance","readInstance"}.issubset(methods):
+        raise AssertionError("Packaged DEX missing tested leaf methods")
+    streams={}
+    for n,event in enumerate(events):
+        if event.get("seq")!=n+1:
+            raise AssertionError("Global concurrent field sequence is not contiguous")
+        tid=event.get("threadId")
+        if not isinstance(tid,int) or tid<=0:
+            raise AssertionError("Concurrent field event lacks a numeric TID")
+        streams.setdefault(tid,[]).append(event)
+    if len(streams)!=2:
+        raise AssertionError(f"Expected two distinct worker event streams, got {len(streams)}")
+    found=set()
+    live_methods={}
+    for tid,rows in streams.items():
+        if len(rows)!=256:
+            raise AssertionError(f"Thread {tid} emitted {len(rows)} events, not 256")
+        first=rows[0].get("value")
+        if first not in (10000,20000):
+            raise AssertionError(f"Unrecognized worker value range: {first}")
+        worker=0 if first==10000 else 1
+        if worker in found:
+            raise AssertionError("Both recorded threads have the same worker identity")
+        found.add(worker)
+        for j,event in enumerate(rows):
+            name="writeInstance" if j%2==0 else "readInstance"
+            m=methods[name]
+            site=m["fields"][0]
+            want={
+                "method":name,"methodClass":m["methodClass"],
+                "declaringClass":site["declaringClass"],
+                "fieldName":"value","fieldType":"I",
+                "valueRepresentation":"signed-int32",
+                "dexId":m["dexId"],
+                "dexSha256":catalog["dexFiles"][m["dexId"]]["sha256"],
+                "methodIndex":m["methodIndex"],"fieldIndex":site["fieldIndex"],
+                "dexPc":site["dexPc"],"opcode":OPCODE[name],
+                "kind":2 if j%2==0 else 1,
+                "value":10000*(worker+1)+17*(j//2),
+                "dexPcSource":"live instruction base verified against packaged DEX bytes"
+            }
+            for key,value in want.items():
+                if event.get(key)!=value:
+                    raise AssertionError(
+                        f"TID={tid} worker={worker} event={j} {key}: "
+                        f"{event.get(key)!r} != {value!r}")
+            method=event.get("runtimeMethodAddress")
+            instruction=event.get("instructionAddress")
+            if not method or not instruction:
+                raise AssertionError("Missing concurrent runtime address provenance")
+            identity=(event["dexSha256"],event["dexId"],event["methodIndex"])
+            binding=(method,int(instruction,16)-2*event["dexPc"])
+            old=live_methods.setdefault(identity,binding)
+            if old!=binding:
+                raise AssertionError("Method's live instruction base differs across threads")
+    if found!={0,1}:
+        raise AssertionError("Both worker value ranges were not observed")
+    if result.get("verifiedRuntimeMethods")!=len(live_methods):
+        raise AssertionError("Concurrent ArtMethod binding cache mismatch")
+    print("PASS: 512 exact field operations from two concurrent Stalker-followed threads")
+
+
+
+def parallel_self_test():
+    """The concurrency oracle must not rely on interleaving order."""
+    methods=[]
+    for method_index,name in enumerate(("writeInstance","readInstance"),40):
+        methods.append({
+            "dexId":0,"methodIndex":method_index,"methodName":name,
+            "methodClass":"Lcom/example/artfieldwatch/NoTemplateTarget;",
+            "fields":[{
+                "declaringClass":"Lcom/example/artfieldwatch/NoTemplateTarget;",
+                "fieldName":"value","fieldIndex":8,"dexPc":0
+            }]
+        })
+    cat={"fixtureMethods":methods,"dexFiles":[{"dexId":0,"sha256":"c"*64}]}
+    rows=[]
+    for i in range(128):
+        for worker in (1,0):
+            for index,m in enumerate(methods):
+                rows.append({
+                    "seq":len(rows)+1,"threadId":900+worker,
+                    "method":m["methodName"],"methodClass":m["methodClass"],
+                    "declaringClass":m["fields"][0]["declaringClass"],
+                    "fieldName":"value","fieldType":"I",
+                    "valueRepresentation":"signed-int32",
+                    "dexId":0,"dexSha256":"c"*64,
+                    "methodIndex":m["methodIndex"],"fieldIndex":8,
+                    "dexPc":0,"opcode":OPCODE[m["methodName"]],
+                    "kind":2 if index==0 else 1,
+                    "value":10000*(worker+1)+17*i,
+                    "dexPcSource":"live instruction base verified against packaged DEX bytes",
+                    "runtimeMethodAddress":f"0x{0x4000+index*32:x}",
+                    "instructionAddress":f"0x{0x5000+index*32:x}"
+                })
+    snapshot={
+        "ready":True,"mode":"stalker-callout","opcodeGroup":"allPrimitives",
+        "errors":[],"dropped":0,"unverifiedSites":0,"pending":0,
+        "hardwareHits":0,"threadsFollowed":2,"events":rows,
+        "fieldHits":512,"completedHits":512,"verifiedRuntimeMethods":2
+    }
+    verify_parallel(cat,snapshot)
+    for broken in (
+        {**snapshot,"events":rows[:-1]},
+        {**snapshot,"events":[{**rows[0],"value":-1},*rows[1:]]},
+        {**snapshot,"events":[{**rows[0],"threadId":999},*rows[1:]]},
+        {**snapshot,"threadsFollowed":1}
+    ):
+        try: verify_parallel(cat,broken)
+        except AssertionError: pass
+        else: raise AssertionError("Invalid concurrent Stalker trace accepted")
+    print("nterp parallel field recorder verifier self-test passed")
+
+
 def main():
     if os.environ.get("ARTWATCH_BUILD_VARIANT") != "release":
         raise RuntimeError("Only the non-debuggable release APK is supported")
     opcode_group = os.environ.get("ARTWATCH_NTERP_GROUP", "scalar32")
     backend = os.environ.get("ARTWATCH_NTERP_BACKEND", "hardware")
+    workload = os.environ.get("ARTWATCH_NTERP_WORKLOAD", "default")
     if opcode_group not in ("scalar32", "wide64", "allPrimitives", *NARROW):
         raise RuntimeError("Unsupported ARTWATCH_NTERP_GROUP")
     if backend not in ("hardware", "software") or (
             (backend == "software") != (opcode_group == "allPrimitives")):
         raise RuntimeError("allPrimitives requires the isolated software backend")
+    if workload not in ("default","parallel") or (
+            workload == "parallel" and backend != "software"):
+        raise RuntimeError("Parallel workload requires software Stalker")
     out = Path(os.environ.get("ARTWATCH_LOG_DIR", "/tmp/artwatch-logs"))
     profile = json.loads((out / "nterp-profile.json").read_text())
     catalog = json.loads((out / "field-sites-release.json").read_text())
     # Explicit selection is test-only. The probe itself consumes arbitrary
     # exact field-site selectors from a packaged single-DEX catalog.
-    if opcode_group in NARROW:
+    if workload == "parallel":
+        selected=[{
+            "methodClass":"Lcom/example/artfieldwatch/NoTemplateTarget;",
+            "methodName":name,"fieldName":"value"
+        } for name in ("writeInstance","readInstance")]
+    elif opcode_group in NARROW:
         _,_,inst_name,static_name,_,_,_=NARROW[opcode_group]
         selected=[{
             "methodClass": ("Lcom/example/artfieldwatch/NoTemplateTarget;"
@@ -754,32 +898,77 @@ def main():
             raise AssertionError("nterp probe initialization failed")
         if results["script"].exports_sync.arm() is not True:
             raise AssertionError("Could not arm nterp opcode recorder")
+        trigger = "parallel" if workload == "parallel" else "run"
         run_result = subprocess.run(
             ["adb", "shell", "am", "start", "-W", "-n", ACTIVITY,
-             "--ez", "run", "true"],
+             "--ez", trigger, "true"],
             capture_output=True, text=True, timeout=12)
         trace.append("workload am start: " + run_result.stdout[:500] +
                      run_result.stderr[:500])
         if run_result.returncode != 0:
             raise AssertionError("Could not trigger nterp workload")
+        if workload == "parallel":
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline:
+                log = lab_log()
+                if "NTERP_LAB_FAILED" in log:
+                    raise AssertionError("Parallel workload failed before release")
+                if "NTERP_LAB_PARALLEL_READY" in log:
+                    break
+                time.sleep(0.2)
+            else:
+                raise AssertionError("Parallel Java workers did not reach start gate")
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline:
+                state=results["script"].exports_sync.snapshot()
+                if state.get("threadsFollowed",0)>=2:
+                    break
+                if state.get("errors"):
+                    raise AssertionError(f"Stalker did not attach both workers: {state}")
+                time.sleep(0.2)
+            else:
+                raise AssertionError("Stalker did not follow two named workers")
+            trace.append("two named Java worker threads are Stalker-followed")
+            go_result=subprocess.run(
+                ["adb","shell","am","start","-W","-n",ACTIVITY,
+                 "--ez","parallelGo","true"],
+                capture_output=True,text=True,timeout=12)
+            if go_result.returncode!=0:
+                raise AssertionError("Could not release concurrent workers")
         done = False
+        expected_done = ("NTERP_LAB_PARALLEL_DONE checks=256 checksum=4116352"
+                         if workload == "parallel" else
+                         "NTERP_LAB_DONE checksum=-16768 nullChecks=2")
         deadline = time.monotonic() + (90 if backend == "software" else 20)
         while time.monotonic() < deadline:
             log = lab_log()
             if "NTERP_LAB_FAILED" in log:
                 raise AssertionError("Synthetic field workload failed")
-            if "NTERP_LAB_DONE checksum=-16768 nullChecks=2" in log:
+            if expected_done in log:
                 done = True
                 break
             time.sleep(0.3)
         if not done:
+            # Persist the agent state even if a Stalker-instrumented workload
+            # stalls. Previously the only snapshot occurred after successful
+            # completion, leaving a 90-second timeout almost opaque.
+            try:
+                stalled = results["script"].exports_sync.snapshot()
+                (out / f"nterp-{opcode_group}{'-parallel' if workload == 'parallel' else ''}-timeout-snapshot.json").write_text(
+                    json.dumps(stalled, indent=2))
+                trace.append("probe timeout snapshot: " + json.dumps({
+                    k:v for k,v in stalled.items() if k != "events"}))
+            except Exception as e:
+                trace.append("probe timeout snapshot unavailable: " + str(e))
             raise AssertionError("Synthetic field workload did not finish")
         snapshot = results["script"].exports_sync.snapshot()
-        (out / f"nterp-{opcode_group}-runtime-events.json").write_text(
+        (out / f"nterp-{opcode_group}{'-parallel' if workload == 'parallel' else ''}-runtime-events.json").write_text(
             json.dumps(snapshot, indent=2))
-        (out / f"nterp-{opcode_group}-probe-messages.json").write_text(
+        (out / f"nterp-{opcode_group}{'-parallel' if workload == 'parallel' else ''}-probe-messages.json").write_text(
             json.dumps(events, indent=2))
-        if opcode_group == "allPrimitives":
+        if workload == "parallel":
+            verify_parallel(catalog,snapshot)
+        elif opcode_group == "allPrimitives":
             verify_all_primitives(catalog,snapshot)
         elif opcode_group == "wide64":
             verify_wide(catalog, snapshot)
@@ -811,11 +1000,11 @@ def main():
             results["session"].detach()
         for worker in joined:
             worker.join(timeout=5)
-        (out / f"nterp-{opcode_group}-host-trace.txt").write_text("\\n".join(trace + errors) + "\\n")
+        (out / f"nterp-{opcode_group}{'-parallel' if workload == 'parallel' else ''}-host-trace.txt").write_text("\\n".join(trace + errors) + "\\n")
         try:
             log_all = subprocess.check_output(
                 ["adb", "logcat", "-d", "-t", "2500"], text=True)
-            (out / f"nterp-{opcode_group}-logcat-tail.txt").write_text(log_all)
+            (out / f"nterp-{opcode_group}{'-parallel' if workload == 'parallel' else ''}-logcat-tail.txt").write_text(log_all)
         except Exception as e:
             trace.append(str(e))
     if errors:
@@ -827,5 +1016,6 @@ if __name__ == "__main__":
         self_test()
         wide_self_test()
         narrow_self_test()
+        parallel_self_test()
     else:
         main()
