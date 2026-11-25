@@ -2,7 +2,7 @@
 
 // EXPERIMENTAL stock ART nterp software handler instrumentation, not Java hooks.
 // Pinned profile: Android 13 API33 x86_64, exact ELF Build ID, 32-bit and 64-bit fields.
-// Interceptor attaches to only selected field opcodes and their successor handlers.
+// Per-worker-thread Stalker callouts observe selected field and successor handlers.
 // It observes nterp only. JIT/AOT/switch and native field accesses are not covered.
 //
 // x86_64 ART nterp ABI: r12=DEX instruction pointer, r13=4-byte vreg base,
@@ -31,7 +31,9 @@ const opcodeGroups = Object.freeze({
 });
 const opcodes = opcodeGroups[opcodeGroup];
 const MAX_RECORDS = 8192;
-const softwareListeners = [];
+const stalkedThreads = new Set();
+let followedCount=0;
+let knownHookCount=0;
 const watchedThreadIds = new Set();
 const pendingByThread = new Map();
 const records = [];
@@ -339,7 +341,7 @@ function install() {
       runtimeMethodAddress:p.method.toString(),
       sourceFile:f.sourceFile,sourceLine:f.sourceLine,
       opcode:f.opcode,kind:f.kind,value,instructionAddress:p.pc.toString(),
-      provenance:'nterp software opcode handler and succeeding opcode'
+      provenance:'nterp Stalker opcode callout and succeeding opcode'
     });
   }
   function opcodeEnter(ctx,opcode) {
@@ -372,54 +374,74 @@ function install() {
     if (sampled)
       pendingByThread.set(tid,{method,fp,pc,nextPc:pc.add(4),sampled});
   }
-  function start() {
-    // Hooks are installed before the selected worker thread is started.
-    // No per-thread debug-register allocations or dynamic breakpoint moves.
+  const handlerByAddress=new Map(
+    Array.from(hookAddresses,([op,address])=>[address.toString(),op]));
+  function transform(iterator) {
+    let instruction;
+    while ((instruction=iterator.next())!==null) {
+      const opcode=handlerByAddress.get(instruction.address.toString());
+      if (opcode!==undefined) {
+        // Callout executes on copied worker-thread instructions. The
+        // process-wide ART handler code remains entirely untouched.
+        iterator.putCallout(context=>{
+          if (!armed) return;
+          try {opcodeEnter(context,opcode);}
+          catch(e) {
+            const message='nterp Stalker opcode '+opcode+': '+(e.stack||e);
+            recordDiagnostic(message);
+            if (diagnostics.length<=8)
+              send({type:'artwatch-nterp-stalker-error',error:message});
+          }
+        });
+      }
+      iterator.keep();
+    }
+  }
+  function followThread(t) {
+    if (!armed || (threadFilter!=='*' && t.name!==threadFilter) ||
+        stalkedThreads.has(t.id)) return;
+    if (stalkedThreads.size>=64) {
+      recordDiagnostic('Stalker thread cap exceeded (64)');
+      return;
+    }
     try {
+      Stalker.follow(t.id,{transform});
+      stalkedThreads.add(t.id);
+      followedCount++;
+      send({type:'artwatch-nterp-stalker-thread',tid:t.id,
+        opcodeHandlers:hookAddresses.size});
+    } catch(e) {
+      recordDiagnostic('Cannot follow field thread tid='+t.id+': '+e);
+    }
+  }
+  function start() {
+    // Follow only the explicitly named worker. Unlike process-global
+    // software hooks, this does not redirect unrelated UI/GC threads.
+    try {
+      armed=true;
       threadObserver=Process.attachThreadObserver({
-        onAdded(t) {
-          if (threadFilter==='*' || t.name===threadFilter)
-            watchedThreadIds.add(t.id);
-        },
-        onRenamed(t) {
-          if (threadFilter==='*' || t.name===threadFilter)
-            watchedThreadIds.add(t.id);
-        },
-        onRemoved(t) {
-          watchedThreadIds.delete(t.id);
+        onAdded(t){followThread(t);},
+        onRenamed(t){followThread(t);},
+        onRemoved(t){
           pendingByThread.delete(t.id);
+          stalkedThreads.delete(t.id);
         }
       });
-      for (const [opcode,address] of hookAddresses) {
-        softwareListeners.push(Interceptor.attach(address,{
-          onEnter() {
-            if (!armed || !watchedThreadIds.has(Process.getCurrentThreadId()))
-              return;
-            try {opcodeEnter(this.context,opcode);}
-            catch(e) {
-              const message='nterp software handler '+opcode+': '+(e.stack||e);
-              recordDiagnostic(message);
-              if (diagnostics.length<=8)
-                send({type:'artwatch-nterp-software-error',error:message});
-            }
-          }
-        }));
-      }
-      Interceptor.flush();
-      armed=true;
       return true;
     } catch(e) {
-      recordDiagnostic('Cannot install software nterp handlers: '+e);
+      recordDiagnostic('Cannot start thread-limited nterp Stalker: '+e);
       armed=false;
-      for (const hook of softwareListeners.splice(0))
-        try {hook.detach();} catch(_){}
       if (threadObserver) {threadObserver.detach();threadObserver=null;}
+      for (const tid of stalkedThreads)
+        try {Stalker.unfollow(tid);} catch(_){}
+      stalkedThreads.clear();
       return false;
     }
   }
+  knownHookCount=hookAddresses.size;
   ready=true;
   send({type:'artwatch-nterp-software-init',ready:true,
-    buildId,mode:'software-interceptor',
+    buildId,mode:'stalker-callout',
     hookOpcodes:Array.from(hookOpcodes).sort((a,b)=>a-b),
     candidateHandlers:hookAddresses.size,selectedFieldSites:selected.count,
     threadFilter,opcodeGroup});
@@ -435,24 +457,27 @@ rpc.exports={
     armed=false;
     if (threadObserver) {threadObserver.detach();threadObserver=null;}
     let failures=0,removed=0;
-    for (const hook of softwareListeners.splice(0)) {
-      try {hook.detach();removed++;}
-      catch(e){failures++;recordDiagnostic('software detach: '+e);}
+    for (const tid of stalkedThreads) {
+      try {Stalker.unfollow(tid);removed++;}
+      catch(e){failures++;recordDiagnostic('Stalker unfollow: '+e);}
     }
+    stalkedThreads.clear();
+    try {Stalker.garbageCollect();} catch(_){}
     watchedThreadIds.clear();
     pendingByThread.clear();
     return {removed,failures,recorded:records.length};
   },
   snapshot() {
     return {
-      ready,armed,opcodeGroup,mode:'software-interceptor',
+      ready,armed,opcodeGroup,mode:'stalker-callout',
       callbacks,fieldHits,completedHits,hardwareHits,
       unverifiedSites,verifiedRuntimeMethods:liveBases.size,
       abandonedFieldAttempts,pending:pendingByThread.size,
       dropped,events:records,errors:diagnostics,
-      attachedHooks:softwareListeners.length
+      threadsFollowed:followedCount,
+      attachedHooks:stalkedThreads.size?knownHookCount:0
     };
   }
 };
 try {armBackend=install();}
-catch(e){recordDiagnostic('nterp software initialization failed: '+(e.stack||e));}
+catch(e){recordDiagnostic('nterp Stalker initialization failed: '+(e.stack||e));}

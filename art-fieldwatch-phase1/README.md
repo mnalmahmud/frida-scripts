@@ -846,38 +846,41 @@ nterp execution, selected methods and their matched DEX bytes. It
 does not cover compiled field accesses, object references, or all
 threads of arbitrary applications.
 
-## Experimental nterp software opcode-hook backend (2026-11-25)
+## Experimental thread-local nterp Stalker backend (2026-11-25)
 
-A separate `nterp-software-probe.js` prototype uses Frida
-`Interceptor.attach` at only the stock ART nterp opcode handlers
-needed for selected packaged DEX field sites **and** the immediately
-succeeding DEX opcode handlers. It records a field write's vreg value
-before the field opcode runs, and a read's destination vreg value at
-the successor handler before any subsequent opcode runs. Failed
-field resolution/null receiver paths do not reach that successor and
-must not be reported as completed field events.
+The first all-primitive software-handler experiment, commit
+\`2e9ab136\`, used \`Interceptor.attach\` to hook shared ART handler
+entrypoints. **This approach failed the non-debuggable emulator test**:
+the Android main thread crashed with SIGSEGV during field resolution,
+even though the callbacks filtered for the separate worker thread.
+Register-preservation/stack assumptions cannot be made safe simply by
+ignoring callbacks from other threads. It is intentionally not
+considered a working backend.
 
-Unlike the six hardware-breakpoint groups, this backend does not
-allocate CPU debug registers. It can select all 24 ordinary primitive
-get/set opcodes and their successors **simultaneously** on a single
-named worker thread in the non-debuggable API33 x86_64 release app,
-subject to runtime validation. The exact libart GNU Build ID and
-128-byte handler size remain mandatory; unknown ART versions fail
-closed. It does patch executable handler instructions in the running
-process using Frida's normal software trampoline mechanism, but does
-**not** alter any ART system image, firmware, application DEX, or
-persistent runtime file.
+The replacement \`nterp-software-probe.js\` prototype uses Frida
+\`Stalker.follow(tid, { transform })\` on the **named worker thread
+only**. Its transformer checks each original instruction address
+against the selected nterp opcode handler entries and inserts
+\`iterator.putCallout\` at selected field handlers and their successor
+handlers. No process-wide ART handler entries are overwritten, no ART
+binary or DEX is modified on disk, and no CPU debug-register
+breakpoints are consumed. The callout captures vregs before a field
+write, or after a successful read at the successor handler. Failed
+null accesses never complete through the recorded successor. The
+same exact DEX method-byte and live DEX-PC provenance checks apply.
 
-The experimental CI mode is
-`ARTWATCH_NTERP_BACKEND=software ARTWATCH_NTERP_GROUP=allPrimitives`.
-It selects the same leaf, non-leaf, repeated-site, float, wide, and
-four narrow primitive workloads as the six hardware passes, but
-requires **5,120 actual field events from one pass** and verifies
-their global execution order, value bits, method/field identities,
-DEX PCs, and two unsuccessful null field attempts. It runs in a
-fresh process after the hardware tests.
+The new experiment uses
+\`ARTWATCH_NTERP_BACKEND=software ARTWATCH_NTERP_GROUP=allPrimitives\`
+for compatibility with the runner's existing environment. A single
+strict API33 non-debuggable release execution must yield 5,120
+ordered field operations (all primitive kinds) and reject the two
+failed null accesses. Until that runtime oracle passes, this is an
+experimental *not-yet-verified* instrumenter, not a claim of complete
+Java field monitoring.
 
-Software hooks on nterp handlers are not a JIT/AOT or object/reference
-capture backend. The generic `selectors=null` mode still requires
-an exact packaged DEX catalog and does not establish arbitrary-app
-coverage or cross-class-loader ownership.
+Stalker rewrites instructions in a thread-local code cache and
+therefore has substantial cost and compatibility risks with ART
+interpreter control flow, indirect jumps, and register conventions.
+A targeted worker-thread experiment cannot establish simultaneous
+app-wide coverage, object reference safety, JIT/AOT coverage, or
+support for other ART builds.

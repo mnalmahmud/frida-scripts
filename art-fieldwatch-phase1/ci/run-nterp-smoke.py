@@ -560,11 +560,12 @@ def verify_all_primitives(catalog, result):
     gives strict provenance and value comparisons without method wrappers.
     """
     if (result.get("ready") is not True or
-            result.get("mode") != "software-interceptor" or
+            result.get("mode") != "stalker-callout" or
             result.get("opcodeGroup") != "allPrimitives" or
             result.get("errors") or result.get("dropped") or
-            result.get("unverifiedSites")):
-        raise AssertionError("Software nterp all-primitive backend unavailable")
+            result.get("unverifiedSites") or
+            not result.get("threadsFollowed")):
+        raise AssertionError("Stalker nterp all-primitive backend unavailable")
     events=result["events"]
     if len(events)!=5120 or result.get("fieldHits")!=5122 or (
             result.get("completedHits")!=5120):

@@ -5,6 +5,8 @@ const assert = require('node:assert/strict');
 const path = require('node:path');
 
 const file = fs.readFileSync(path.join(__dirname, '..', 'nterp-field-probe.js'), 'utf8');
+const softFile = fs.readFileSync(
+  path.join(__dirname,'..','nterp-software-probe.js'),'utf8');
 const begin = file.indexOf('function selectFieldSites(data, selectors) {');
 const end = file.indexOf('\nfunction install() {', begin);
 assert(begin >= 0 && end > begin, 'Cannot find actual Frida selector');
@@ -22,12 +24,16 @@ function selectForGroup(group) {
       0x66,0x67,0x68,0x6a,0x6b,0x6c,0x6d]
   };
   const ops = opcodeGroups[group];
+  const source = group === 'allPrimitives' ? softFile : file;
+  const selectorBegin=source.indexOf('function selectFieldSites(data, selectors) {');
+  const selectorEnd=source.indexOf('\nfunction install() {',selectorBegin);
+  assert(selectorBegin >= 0 && selectorEnd > selectorBegin);
   vm.runInContext(
     'const opcodeGroup=' + JSON.stringify(group) + ';\n' +
     'const fieldOps=new Set(' + JSON.stringify(ops) + ');\n' +
     'const readOps=new Set([0x52,0x53,0x55,0x56,0x57,0x58,' +
       '0x60,0x61,0x63,0x64,0x65,0x66]);\n' +
-    file.slice(begin, end) + '\nglobalThis.select=selectFieldSites;', ctx);
+    source.slice(selectorBegin, selectorEnd) + '\nglobalThis.select=selectFieldSites;', ctx);
   return ctx.select;
 }
 const select = selectForGroup('scalar32');
@@ -189,13 +195,11 @@ assert.equal(initial.unverifiedSites, 0);
 assert.equal(initial.events.length, 0);
 assert.deepEqual(JSON.parse(JSON.stringify(smoke.rpc.exports.stop())),
   {removed:0,failures:0,recorded:0});
-const softFile=fs.readFileSync(
-  path.join(__dirname,'..','nterp-software-probe.js'),'utf8');
 const softContext=vm.createContext({rpc:{exports:{}},send() {}});
 vm.runInContext(softFile,softContext);
 const softSnapshot=softContext.rpc.exports.snapshot();
 assert.equal(softSnapshot.ready,false);
-assert.equal(softSnapshot.mode,'software-interceptor');
+assert.equal(softSnapshot.mode,'stalker-callout');
 assert.equal(softSnapshot.attachedHooks,0);
 assert.equal(softSnapshot.unverifiedSites,0);
 assert.equal(softSnapshot.events.length,0);
