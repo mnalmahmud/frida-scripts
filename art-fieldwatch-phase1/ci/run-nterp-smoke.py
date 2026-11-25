@@ -550,12 +550,69 @@ def narrow_self_test():
     print("nterp narrow-field verifier self-tests passed")
 
 
+
+def verify_all_primitives(catalog, result):
+    """One stock nterp execution, all primitive DEX field kinds at once.
+
+    Each iteration contains scalar32 (16), wide64 (8), and four narrow
+    families (4 each), in the exact Java workload order. Re-using each
+    independent oracle after checking the original global event position
+    gives strict provenance and value comparisons without method wrappers.
+    """
+    if (result.get("ready") is not True or
+            result.get("mode") != "software-interceptor" or
+            result.get("opcodeGroup") != "allPrimitives" or
+            result.get("errors") or result.get("dropped") or
+            result.get("unverifiedSites")):
+        raise AssertionError("Software nterp all-primitive backend unavailable")
+    events=result["events"]
+    if len(events)!=5120 or result.get("fieldHits")!=5122 or (
+            result.get("completedHits")!=5120):
+        raise AssertionError(
+            f"Expected 5120 successful field events and two failed null attempts: "
+            f"recorded={len(events)} fieldHits={result.get('fieldHits')} "
+            f"completed={result.get('completedHits')}")
+    def group_view(offset,length,group):
+        normalized=[]
+        for i in range(128):
+            for j,event in enumerate(events[i*40+offset:i*40+offset+length]):
+                original_seq=i*40+offset+j+1
+                if event.get("seq")!=original_seq:
+                    raise AssertionError(
+                        f"Global all-primitive event sequence corrupted at {i},{j}")
+                normalized.append({**event,"seq":i*length+j+1})
+        identities={(e["dexSha256"],e["dexId"],e["methodIndex"])
+                    for e in normalized}
+        return {**result,"opcodeGroup":group,"events":normalized,
+                "fieldHits":len(normalized),"completedHits":len(normalized),
+                "verifiedRuntimeMethods":len(identities),"pending":0}
+    scalar=group_view(0,16,"scalar32")
+    leaf_only={**scalar,"events":[
+        e for e in scalar["events"] if e["method"] in ORDER]}
+    verify(catalog,leaf_only,sequence_stride=16)
+    verify_nonleaf(catalog,scalar)
+    verify_wide(catalog,group_view(16,8,"wide64"))
+    offset=24
+    for group in NARROW:
+        verify_narrow(catalog,group_view(offset,4,group),group)
+        offset+=4
+    all_methods={(e["dexSha256"],e["dexId"],e["methodIndex"])
+                 for e in events}
+    if result.get("verifiedRuntimeMethods")!=len(all_methods):
+        raise AssertionError("All-primitive runtime method count mismatch")
+    print("PASS: 5120 exact primitive field operations in one nterp software-hook pass")
+
+
 def main():
     if os.environ.get("ARTWATCH_BUILD_VARIANT") != "release":
         raise RuntimeError("Only the non-debuggable release APK is supported")
     opcode_group = os.environ.get("ARTWATCH_NTERP_GROUP", "scalar32")
-    if opcode_group not in ("scalar32", "wide64", *NARROW):
+    backend = os.environ.get("ARTWATCH_NTERP_BACKEND", "hardware")
+    if opcode_group not in ("scalar32", "wide64", "allPrimitives", *NARROW):
         raise RuntimeError("Unsupported ARTWATCH_NTERP_GROUP")
+    if backend not in ("hardware", "software") or (
+            (backend == "software") != (opcode_group == "allPrimitives")):
+        raise RuntimeError("allPrimitives requires the isolated software backend")
     out = Path(os.environ.get("ARTWATCH_LOG_DIR", "/tmp/artwatch-logs"))
     profile = json.loads((out / "nterp-profile.json").read_text())
     catalog = json.loads((out / "field-sites-release.json").read_text())
@@ -593,6 +650,22 @@ def main():
                             "Lcom/example/artfieldwatch/NoTemplateStaticState;"),
             "methodName": name, "fieldName": "floating"
         } for name in FLOAT_ORDER)
+        if opcode_group == "allPrimitives":
+            selected.extend({
+                "methodClass": ("Lcom/example/artfieldwatch/NoTemplateTarget;"
+                                if "Instance" in name else
+                                "Lcom/example/artfieldwatch/NoTemplateStaticState;"),
+                "methodName": name, "fieldName": WIDE_FIELDS[name][1]
+            } for name in WIDE_ORDER)
+            for group in NARROW:
+                _,_,inst_name,static_name,_,_,_=NARROW[group]
+                selected.extend({
+                    "methodClass": ("Lcom/example/artfieldwatch/NoTemplateTarget;"
+                                    if "Instance" in name else
+                                    "Lcom/example/artfieldwatch/NoTemplateStaticState;"),
+                    "methodName":name,
+                    "fieldName":inst_name if "Instance" in name else static_name
+                } for name in narrow_names(group))
     source = ("globalThis.__artwatchNterpOpcodeGroup=" +
               json.dumps(opcode_group) + ";\n" +
               "globalThis.__artwatchNterpThreadFilter=" +
@@ -600,7 +673,8 @@ def main():
               "globalThis.__artwatchNterpSelectors=" + json.dumps(selected) + ";\n" +
               "globalThis.__artwatchNterpProfile=" + json.dumps(profile) + ";\n" +
               "globalThis.__artwatchNterpCatalog=" + json.dumps(catalog) + ";\n" +
-              (BASE / "nterp-field-probe.js").read_text())
+              (BASE / ("nterp-software-probe.js"
+                       if backend == "software" else "nterp-field-probe.js")).read_text())
     import frida
     device = frida.get_usb_device(timeout=30)
     joined, results, errors, events = [], {}, [], []
@@ -688,7 +762,7 @@ def main():
         if run_result.returncode != 0:
             raise AssertionError("Could not trigger nterp workload")
         done = False
-        deadline = time.monotonic() + 20
+        deadline = time.monotonic() + (90 if backend == "software" else 20)
         while time.monotonic() < deadline:
             log = lab_log()
             if "NTERP_LAB_FAILED" in log:
@@ -704,7 +778,9 @@ def main():
             json.dumps(snapshot, indent=2))
         (out / f"nterp-{opcode_group}-probe-messages.json").write_text(
             json.dumps(events, indent=2))
-        if opcode_group == "wide64":
+        if opcode_group == "allPrimitives":
+            verify_all_primitives(catalog,snapshot)
+        elif opcode_group == "wide64":
             verify_wide(catalog, snapshot)
         elif opcode_group in NARROW:
             verify_narrow(catalog, snapshot, opcode_group)

@@ -845,3 +845,39 @@ measurements. The backend remains limited to one pinned ART build,
 nterp execution, selected methods and their matched DEX bytes. It
 does not cover compiled field accesses, object references, or all
 threads of arbitrary applications.
+
+## Experimental nterp software opcode-hook backend (2026-11-25)
+
+A separate `nterp-software-probe.js` prototype uses Frida
+`Interceptor.attach` at only the stock ART nterp opcode handlers
+needed for selected packaged DEX field sites **and** the immediately
+succeeding DEX opcode handlers. It records a field write's vreg value
+before the field opcode runs, and a read's destination vreg value at
+the successor handler before any subsequent opcode runs. Failed
+field resolution/null receiver paths do not reach that successor and
+must not be reported as completed field events.
+
+Unlike the six hardware-breakpoint groups, this backend does not
+allocate CPU debug registers. It can select all 24 ordinary primitive
+get/set opcodes and their successors **simultaneously** on a single
+named worker thread in the non-debuggable API33 x86_64 release app,
+subject to runtime validation. The exact libart GNU Build ID and
+128-byte handler size remain mandatory; unknown ART versions fail
+closed. It does patch executable handler instructions in the running
+process using Frida's normal software trampoline mechanism, but does
+**not** alter any ART system image, firmware, application DEX, or
+persistent runtime file.
+
+The experimental CI mode is
+`ARTWATCH_NTERP_BACKEND=software ARTWATCH_NTERP_GROUP=allPrimitives`.
+It selects the same leaf, non-leaf, repeated-site, float, wide, and
+four narrow primitive workloads as the six hardware passes, but
+requires **5,120 actual field events from one pass** and verifies
+their global execution order, value bits, method/field identities,
+DEX PCs, and two unsuccessful null field attempts. It runs in a
+fresh process after the hardware tests.
+
+Software hooks on nterp handlers are not a JIT/AOT or object/reference
+capture backend. The generic `selectors=null` mode still requires
+an exact packaged DEX catalog and does not establish arbitrary-app
+coverage or cross-class-loader ownership.

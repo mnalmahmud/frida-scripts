@@ -16,7 +16,10 @@ function selectForGroup(group) {
     boolean8: [0x55,0x5c,0x63,0x6a],
     byte8: [0x56,0x5d,0x64,0x6b],
     char16: [0x57,0x5e,0x65,0x6c],
-    short16: [0x58,0x5f,0x66,0x6d]
+    short16: [0x58,0x5f,0x66,0x6d],
+    allPrimitives: [0x52,0x53,0x55,0x56,0x57,0x58,0x59,0x5a,
+      0x5c,0x5d,0x5e,0x5f,0x60,0x61,0x63,0x64,0x65,
+      0x66,0x67,0x68,0x6a,0x6b,0x6c,0x6d]
   };
   const ops = opcodeGroups[group];
   vm.runInContext(
@@ -29,6 +32,7 @@ function selectForGroup(group) {
 }
 const select = selectForGroup('scalar32');
 const selectWide = selectForGroup('wide64');
+const selectAll = selectForGroup('allPrimitives');
 const cls = 'Lexample/Sample;';
 const mk = (methodName, methodIndex, fieldName, fieldIndex, dexPc, opcode, operation, access) => ({
   methodClass: cls, methodName, methodIndex, fieldName, fieldIndex, dexPc,
@@ -96,6 +100,8 @@ const wideDex={...dex,fieldAccesses:wideFields,
     insnsSize:2,insnsHex:codeFor(f)
   }))};
 assert.equal(selectWide({dexFiles:[wideDex]}).count,4);
+assert.equal(selectAll({dexFiles:[wideDex]}).count,4);
+assert.equal(selectAll({dexFiles:[floatDex]}).count,5);
 assert.equal(selectWide({dexFiles:[wideDex]}).methods.get(23)[0].sites.get(0).fieldType,'D');
 
 const narrowFamilies = {
@@ -121,6 +127,7 @@ for (const [group,[descriptor,valueKind,iget,iput,sget,sput]] of
       methodName:f.methodName,insnsSize:2,insnsHex:codeFor(f)
     }))};
   assert.equal(selectNarrow({dexFiles:[narrowDex]}).count,4);
+  assert.equal(selectAll({dexFiles:[narrowDex]}).count,4);
   for (let i=0;i<4;i++) {
     const site=selectNarrow({dexFiles:[narrowDex]}).methods
       .get(30+i)[0].sites.get(0);
@@ -182,4 +189,16 @@ assert.equal(initial.unverifiedSites, 0);
 assert.equal(initial.events.length, 0);
 assert.deepEqual(JSON.parse(JSON.stringify(smoke.rpc.exports.stop())),
   {removed:0,failures:0,recorded:0});
-console.log('Nterp data-driven field selector self-tests passed');
+const softFile=fs.readFileSync(
+  path.join(__dirname,'..','nterp-software-probe.js'),'utf8');
+const softContext=vm.createContext({rpc:{exports:{}},send() {}});
+vm.runInContext(softFile,softContext);
+const softSnapshot=softContext.rpc.exports.snapshot();
+assert.equal(softSnapshot.ready,false);
+assert.equal(softSnapshot.mode,'software-interceptor');
+assert.equal(softSnapshot.attachedHooks,0);
+assert.equal(softSnapshot.unverifiedSites,0);
+assert.equal(softSnapshot.events.length,0);
+assert.deepEqual(JSON.parse(JSON.stringify(softContext.rpc.exports.stop())),
+  {removed:0,failures:0,recorded:0});
+console.log('Nterp hardware and software field selector self-tests passed');

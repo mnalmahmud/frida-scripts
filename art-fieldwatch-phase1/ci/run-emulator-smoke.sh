@@ -94,4 +94,10 @@ if [[ "$variant" == release && "${ARTWATCH_SHADOW_SHIM:-0}" == 1 ]]; then
     echo "Stock ART nterp field opcode group: $group"
     ARTWATCH_NTERP_GROUP="$group" python3 art-fieldwatch-phase1/ci/run-nterp-smoke.py
   done
+  # Experimental software opcode-entry hooks, without the four-slot limit.
+  # This intentionally runs in another fresh release process. An exact
+  # 5120-event oracle must pass before calling it supported.
+  adb shell am force-stop com.example.artfieldwatch
+  ARTWATCH_NTERP_GROUP=allPrimitives ARTWATCH_NTERP_BACKEND=software \
+    python3 art-fieldwatch-phase1/ci/run-nterp-smoke.py
 fi
