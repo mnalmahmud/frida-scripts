@@ -266,7 +266,14 @@ function install() {
     throw new Error('Unsupported nterp software dispatcher ABI');
   if (typeof threadFilter !== 'string' || threadFilter.length === 0 ||
       threadFilter.length > 128)
-    throw new Error('Provide exact target thread name or *');
+    throw new Error('Provide thread name, regex:<pattern>, or *');
+  const threadPattern=threadFilter.startsWith('regex:') ?
+    new RegExp(threadFilter.slice(6)) : null;
+  function matchesThread(t) {
+    return threadFilter==='*' ||
+      (threadPattern===null ? t.name===threadFilter :
+        typeof t.name==='string' && threadPattern.test(t.name));
+  }
   const selected=selectFieldSites(catalog,selectors);
   const methods=selected.methods;
   const art=Process.findModuleByName('libart.so');
@@ -470,8 +477,8 @@ function install() {
     }
   }
   function followThread(t) {
-    if (!armed || (threadFilter!=='*' && t.name!==threadFilter) ||
-        stalkedThreads.has(t.id)) return;
+    if (!armed || !matchesThread(t) || stalkedThreads.has(t.id))
+      return;
     if (stalkedThreads.size>=64) {
       recordDiagnostic('Stalker thread cap exceeded (64)');
       return;

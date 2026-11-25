@@ -1135,3 +1135,48 @@ Test implementation:
 `ci/run-generic-stream-smoke.py`. This tests transport and
 high-frequency field attribution under the existing **nterp-only**
 coverage; it does not imply compiled-code or arbitrary-thread coverage.
+
+## Watch a field across every caller method (field-centric selector)
+
+The public CLI now supports `--watch-field
+'Lpackage/DeclaringClass;#fieldName'` to select a **declared Java
+field**, not one particular method that reads or writes it.
+The APK DEX indexer enumerates every matching `iget/iput/sget/sput`
+site across all packaged DEX methods, retains its actual caller
+class, full method prototype and DEX PC, and sends the reduced
+exact instruction-byte catalog to the nterp Stalker.
+
+```sh
+python3 art-fieldwatch-phase1/watch.py \
+  --apk base.apk --auto-profile \
+  --process com.example.app --thread MyWorker \
+  --watch-field 'Lcom/example/Account;#balance' \
+  --output field-events.jsonl \
+  --coverage-output observed-sites.json
+```
+
+`--field` remains useful when only one executing method should
+trigger observations. `--watch-field` matches all callers in the
+supplied **packaged APK DEX catalog**; it does not intercept
+nterp-independent JIT/AOT, JNI, dynamically loaded DEX, nor
+unfollowed threads. A DEX site indexed in the catalog but absent
+from the observation report's nonzero sites may simply never run.
+The Android 33/34 generic-CLI release tests exercise this
+field-centric selector against four different overloaded caller
+methods and still demand their 512 exact runtime events.
+
+## Select several worker threads without following the whole process
+
+The host CLI accepts `--thread-regex '^Worker-[0-9]+$'` as an
+alternative to `--thread Worker` or the broad `--thread '*'`.
+The agent uses one precompiled JavaScript RegExp to filter
+`Process.attachThreadObserver` additions and renames, then
+`Stalker.follow(tid)` on only matched live threads. This is useful
+for independently named Java worker pools and avoids forcing a
+potentially dangerous all-thread follow.
+
+The two-worker Android runtime oracle now names the workers
+`NterpFieldProbe-0` and `NterpFieldProbe-1`, selects them both
+with `regex:^NterpFieldProbe-[01]$`, and requires 256 exact field
+operations from each thread. This does not establish safety for
+arbitrary non-Java/GC/Frida threads or compiled instructions.

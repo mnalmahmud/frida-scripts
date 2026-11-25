@@ -66,7 +66,7 @@ def main():
     cmd = [sys.executable, str(BASE / "watch.py"),
            "--apk", str(apk), "--auto-profile",
            "--process", pid, "--thread", "NterpFieldProbe",
-           "--poll-ms", "20", "--duration", "22",
+           "--poll-ms", "50", "--duration", "22",
            "--output", str(output), "--coverage-output", str(report)]
     for name in SITES:
         cmd += ["--field", f"{OWNER}#{name}#value"]

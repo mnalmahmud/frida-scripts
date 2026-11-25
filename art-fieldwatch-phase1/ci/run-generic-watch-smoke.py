@@ -57,8 +57,11 @@ def main():
          "--process",pid,"--thread","NterpFieldProbe",
          "--duration","15","--poll-ms","50",
          "--output",str(out),"--coverage-output",str(coverage)]
-    for name,proto,_,_ in SITES:
-        cmd.extend(["--field",f"{OWNER}#{name}{proto}#value"])
+    # Select the FIELD itself, across every DEX caller method. There
+    # are more eligible packaged sites than the four workload overloads,
+    # so the observation report must distinguish executed nterp sites
+    # from sites that were merely indexed.
+    cmd.extend(["--watch-field", f"{OWNER}#value"])
     with stderr.open("w+",encoding="utf-8") as log:
         child=subprocess.Popen(cmd,stdout=subprocess.DEVNULL,stderr=log)
         try:
@@ -117,12 +120,16 @@ def main():
                         f"Generic watcher event i={i} j={j}: "
                         f"{key} {row.get(key)!r} != {value!r}")
     summary=json.loads(coverage.read_text())
+    selected=summary["totalSelectedSites"]
+    nonzero=sorted(site["observedCount"] for site in summary["sites"]
+                   if site["observedCount"])
     if (summary["observedEvents"]!=512 or
-            summary["totalSelectedSites"]!=4 or
-            summary["observedSites"]!=4 or
-            summary["unobservedSites"]!=0 or
-            sorted(site["observedCount"] for site in summary["sites"])!=[128]*4):
-        raise AssertionError("Generic watcher coverage report incorrect")
+            selected<4 or summary["observedSites"]!=4 or
+            summary["unobservedSites"]!=selected-4 or
+            nonzero != [128]*4 or
+            any(site["declaringClass"]!=OWNER for site in
+                summary["sites"])):
+        raise AssertionError("Declaring-field watcher coverage report incorrect")
     print("PASS: generic watch.py --auto-profile streamed 512 exact "
           "overloaded nterp field events with four fully observed DEX sites")
 

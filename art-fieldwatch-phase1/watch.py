@@ -56,6 +56,18 @@ def parse_selector(text):
     return result
 
 
+def parse_declared_field(text):
+    """Select a DEX field by its DECLARING class, not the executing method."""
+    parts = text.split("#")
+    if (len(parts) != 2 or not all(parts) or len(text) > 1024 or
+            not parts[0].startswith("L") or
+            not parts[0].endswith(";") or
+            "/" not in parts[0] or any(c.isspace() for c in text)):
+        raise ValueError(
+            "Field watch must be 'Lpackage/DeclaringClass;#fieldName'")
+    return {"declaringClass": parts[0], "fieldName": parts[1]}
+
+
 def verify_profile(profile):
     if (not isinstance(profile, dict) or profile.get("schemaVersion") != 1 or
             profile.get("api") not in KNOWN_BUILD_IDS or
@@ -185,6 +197,40 @@ def select_catalog(catalog, selectors):
     return result
 
 
+def select_catalog_by_declared_fields(catalog, field_selectors):
+    """Select every DEX caller site accessing each named declaring field.
+
+    A declared field may have many iget/iput/sget/sput instructions in
+    unrelated caller methods. Preserve original per-DEX method indices and
+    exact method bytes, only pruning unselected sites and methods.
+    """
+    if not field_selectors:
+        raise ValueError("At least one declaring-field selector is required")
+    wanted = {(s["declaringClass"], s["fieldName"])
+              for s in field_selectors}
+    seen = set()
+    result = copy.deepcopy(catalog)
+    for dex in result["dexFiles"]:
+        accesses = []
+        method_ids = set()
+        for site in dex["fieldAccesses"]:
+            identity = (site["declaringClass"], site["fieldName"])
+            if identity not in wanted:
+                continue
+            accesses.append(site)
+            method_ids.add(site["methodIndex"])
+            seen.add(identity)
+        dex["fieldAccesses"] = accesses
+        dex["fieldMethods"] = [method for method in dex["fieldMethods"]
+                               if method["methodIndex"] in method_ids]
+        dex["count"] = len(accesses)
+    if seen != wanted:
+        raise ValueError("Requested declaring fields missing from DEX: " +
+                         repr(sorted(wanted-seen)))
+    result["totalFieldSites"] = sum(d["count"] for d in result["dexFiles"])
+    return result
+
+
 class CoverageTracker:
     """Report observed nterp sites without claiming executed-code coverage."""
     def __init__(self,catalog,include_object=True):
@@ -201,6 +247,7 @@ class CoverageTracker:
                     "dexId":dex["dexId"],"dexName":dex.get("name"),
                     "dexLocation":dex.get("dexLocation",dex.get("name")),
                     "methodClass":site["methodClass"],
+                    "declaringClass":site["declaringClass"],
                     "methodName":site["methodName"],
                     "methodPrototype":site.get("methodPrototype"),
                     "fieldName":site["fieldName"],"fieldType":site["fieldType"],
@@ -291,9 +338,11 @@ def self_test():
         "dexId":0,"count":2,
         "fieldAccesses":[
             {**example,"methodIndex":1,"fieldIndex":2,
+             "declaringClass":"Lcom/example/Shared;",
              "dexPc":0,"fieldType":"I","valueKind":"int","opcode":"0x59"},
             {"methodClass":"Lcom/example/Other;","methodName":"run",
              "fieldName":"value","methodIndex":2,"fieldIndex":3,
+             "declaringClass":"Lcom/example/Shared;",
              "dexPc":0,"fieldType":"I","valueKind":"int","opcode":"0x59"}],
         "fieldMethods":[{"methodIndex":1,"registersSize":3},
                         {"methodIndex":2,"registersSize":2}],
@@ -315,6 +364,29 @@ def self_test():
     else:raise AssertionError("Unknown runtime DEX site accepted")
     assert len(filtered["dexFiles"][0]["fieldAccesses"])==1
     assert len(filtered["dexFiles"][0]["fieldMethods"])==1
+    declared = parse_declared_field("Lcom/example/Shared;#count")
+    assert declared == {"declaringClass":"Lcom/example/Shared;",
+                        "fieldName":"count"}
+    for bad in ("Lx;#field","Lcom/X;#","Lcom/X;#field#more",
+                "Lcom/X;#field name","Lcom/X;"):
+        try: parse_declared_field(bad)
+        except ValueError: pass
+        else: raise AssertionError("Malformed declaring-field selector accepted")
+    multi = copy.deepcopy(cat)
+    for site in multi["dexFiles"][0]["fieldAccesses"]:
+        site["declaringClass"] = "Lcom/example/Shared;"
+        site["fieldName"] = "count"
+    filtered_multi = select_catalog_by_declared_fields(multi,[declared])
+    assert filtered_multi["totalFieldSites"]==2
+    assert len(filtered_multi["dexFiles"][0]["fieldMethods"])==2
+    assert filtered_multi["dexFiles"][0]["fieldAccesses"][0][
+        "methodClass"] != filtered_multi["dexFiles"][0]["fieldAccesses"][1][
+        "methodClass"]
+    assert multi["totalFieldSites"]==2
+    try: select_catalog_by_declared_fields(multi,[
+        parse_declared_field("Lcom/example/NotPresent;#count")])
+    except ValueError: pass
+    else: raise AssertionError("Unmatched declaring-field selector accepted")
     assert cat["totalFieldSites"]==2  # no mutation of caller input
     assert select_catalog(cat,None)["totalFieldSites"]==2
     overload_cat = copy.deepcopy(cat)
@@ -353,21 +425,37 @@ def self_test():
 
 def watch(args):
     if not args.apk or not (args.profile or args.auto_profile) or (
-            not args.process or not args.thread):
-        raise ValueError("Provide --apk, --process, --thread and an ART profile")
-    if not args.all_fields and not args.field:
-        raise ValueError("Use explicit --field selectors or --all-fields")
+            not args.process or not (args.thread or args.thread_regex)):
+        raise ValueError("Provide --apk, --process, --thread/--thread-regex and an ART profile")
+    if not args.all_fields and not args.field and not args.watch_field:
+        raise ValueError(
+            "Choose --field, --watch-field or --all-fields")
     if args.duration < 0 or not 50 <= args.poll_ms <= 5000:
         raise ValueError("Invalid duration/poll interval")
     selectors = ([parse_selector(item) for item in args.field]
                  if args.field else None)
+    declaring_fields = ([parse_declared_field(item) for item in args.watch_field]
+                        if args.watch_field else None)
     group = "allPrimitives" if args.primitives_only else "allFields"
     profile = (discover_device_profile() if args.auto_profile else
                verify_profile(json.loads(args.profile.read_text())))
-    catalog = select_catalog(inventory_packages(args.apk), selectors)
+    full_catalog = inventory_packages(args.apk)
+    if declaring_fields is not None:
+        # The runtime agent gets a narrowly scoped DEX catalog and null
+        # method selectors: selected callers may differ in method name.
+        catalog = select_catalog_by_declared_fields(
+            full_catalog, declaring_fields)
+    else:
+        catalog = select_catalog(full_catalog, selectors)
     if not catalog["totalFieldSites"]:
         raise ValueError("No field instructions were found in the APK")
-    source=assemble_agent(catalog,profile,selectors,args.thread,group)
+    thread_selection=('regex:'+args.thread_regex
+                      if args.thread_regex is not None else args.thread)
+    if args.thread_regex is not None:
+        try: re.compile(args.thread_regex)
+        except re.error as e:
+            raise ValueError("Invalid thread selection regex") from e
+    source=assemble_agent(catalog,profile,selectors,thread_selection,group)
 
     # Frida is imported only when actually running on a connected device;
     # static/unit tests do not require the mobile SDK or live device.
@@ -432,7 +520,7 @@ def watch(args):
             device.resume(spawned)
             resumed=True
         print(f"Watching {args.process}: {catalog['totalFieldSites']} packaged "
-              f"sites, group={group}, thread={args.thread}; "
+              f"sites, group={group}, thread={thread_selection}; "
               "nterp-only; no JIT/AOT coverage", file=sys.stderr,flush=True)
         started=time.monotonic()
         while not args.duration or time.monotonic()-started<args.duration:
@@ -496,10 +584,16 @@ def main():
     profile_args.add_argument("--auto-profile",action="store_true",
                               help="Pull installed libart ELF and verify its exact ABI")
     parser.add_argument("--process",help="Existing process name/PID or spawn package")
-    parser.add_argument("--thread",help="Exact thread name, or * for all threads")
+    thread_selection=parser.add_mutually_exclusive_group()
+    thread_selection.add_argument("--thread",
+                                  help="Exact thread name, or * for all threads")
+    thread_selection.add_argument("--thread-regex",
+                                  help="Match worker thread names by JS RegExp")
     selection=parser.add_mutually_exclusive_group()
     selection.add_argument("--field",action="append",
-                           help="Class#method[(paramTypes)returnType]#field")
+                           help="CallerClass#method[(paramTypes)returnType]#field")
+    selection.add_argument("--watch-field",action="append",
+                           help="DeclaringClass#fieldName across all DEX callers")
     selection.add_argument("--all-fields",action="store_true",
                            help="Explicitly select all packaged DEX field sites")
     parser.add_argument("--primitives-only",action="store_true",
