@@ -62,9 +62,24 @@ public final class NoTemplateNterpActivity extends Activity {
     }
     final boolean parallel = intent.getBooleanExtra("parallel", false);
     final boolean overload = intent.getBooleanExtra("overload", false);
-    if ((!intent.getBooleanExtra("run", false) && !parallel && !overload) ||
-        started) return;
+    final boolean streaming = intent.getBooleanExtra("streaming", false);
+    if ((!intent.getBooleanExtra("run", false) && !parallel && !overload &&
+         !streaming) || started) return;
     started = true;
+    if (streaming) {
+      new Thread(() -> {
+        try {
+          int checksum = NoTemplateTarget.exerciseStreaming();
+          if (checksum != 31024)
+            throw new AssertionError("Streaming field checksum mismatch");
+          Log.i("ARTWATCH_NTERP_LAB",
+                "NTERP_LAB_STREAMING_DONE checks=10000 checksum=" + checksum);
+        } catch (Throwable e) {
+          Log.e("ARTWATCH_NTERP_LAB", "NTERP_LAB_FAILED", e);
+        }
+      }, "NterpFieldProbe").start();
+      return;
+    }
     if (overload) {
       new Thread(() -> {
         try {

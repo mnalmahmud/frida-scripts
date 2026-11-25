@@ -53,6 +53,24 @@ public final class NoTemplateTarget {
     return receiver.value;
   }
 
+  // Transport stress: 20,000 real field opcodes, substantially beyond the
+  // agent's former 8,192-record snapshot limit. All exact values are
+  // independently checked by Java and by the host JSONL verifier.
+  public static int exerciseStreaming() {
+    NoTemplateTarget receiver = new NoTemplateTarget();
+    int checksum = 0;
+    for (int i = 0; i < 10000; i++) {
+      int value = 123456 + (i * 7);
+      writeInstance(receiver, value);
+      int observed = readInstance(receiver);
+      if (observed != value) {
+        throw new AssertionError("Streaming field mismatch i=" + i);
+      }
+      checksum ^= observed;
+    }
+    return checksum;
+  }
+
   public static void writeInstanceFloat(NoTemplateTarget receiver, float value) {
     receiver.floating = value;
   }

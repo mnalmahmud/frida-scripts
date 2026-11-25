@@ -1112,3 +1112,26 @@ API33 and API34 release jobs include this test; an offline
 This verifies the *actual user-facing host tool* rather than
 only embedded synthetic Frida scripts. It does not expand monitoring
 to JIT/AOT/native or unallowlisted ART versions.
+
+## Sustained host-streaming integrity regression
+
+A separate non-debuggable runtime workload now performs 10,000
+`iput` writes and 10,000 `iget` reads of the same instance field
+through two ordinary Java DEX leaf methods, with deterministic
+individually verified integer values. The public `watch.py` host
+arms Frida Stalker on the executing worker thread and polls the
+agent's `drain()` RPC every 20 ms, collecting JSONL records.
+
+The oracle requires 20,000 **actual emitted field events**, strictly
+monotonic and contiguous event sequence numbers, exact int32 read
+and write values, opcode and method identities, provenance-checked
+DEX PCs and two selected DEX sites observed 10,000 times each. It
+is intentionally larger than the earlier 8,192-record fixed queue
+to validate genuine host-to-agent draining rather than simply
+increasing a static event buffer. Any queue overrun, unverified DEX
+site, or Stalker callback diagnostic must fail the test.
+
+Test implementation:
+`ci/run-generic-stream-smoke.py`. This tests transport and
+high-frequency field attribution under the existing **nterp-only**
+coverage; it does not imply compiled-code or arbitrary-thread coverage.

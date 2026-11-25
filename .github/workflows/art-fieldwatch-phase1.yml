@@ -27,6 +27,7 @@ jobs:
       - run: python3 art-fieldwatch-phase1/watch.py --self-test
       - run: python3 -m py_compile art-fieldwatch-phase1/watch.py
       - run: python3 -m py_compile art-fieldwatch-phase1/ci/run-generic-watch-smoke.py
+      - run: python3 -m py_compile art-fieldwatch-phase1/ci/run-generic-stream-smoke.py
       - run: python3 art-fieldwatch-phase1/ci/nterp_profile.py --self-test
       - run: python3 art-fieldwatch-phase1/ci/run-nterp-smoke.py --self-test
       - run: python3 -m py_compile art-fieldwatch-phase1/ci/smoke_test.py
