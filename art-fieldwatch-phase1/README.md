@@ -994,3 +994,46 @@ instructions were observed.
 
 Offline integration validation:
 `python3 art-fieldwatch-phase1/watch.py --self-test`.
+
+## Second stock ART profile: Android 34 x86_64 (2026-11-25)
+
+Android 34's stock `libart.so` image from the CI emulator has a
+distinct GNU Build ID, `b6dc79e02101ea00827a35a55ab6597a`. It
+has a full ELF symbol table. The offline `nterp_profile.py`
+now accepts **only** this explicitly allowlisted API34 build in
+addition to the previously verified API33 build, and still requires
+unique nterp start/end symbols, a 256 × 128-byte handler table,
+and x86_64 ET_DYN ELF structure.
+
+A new non-debuggable API34 release CI job produces the profile from
+the **actual pulled libart.so**, checks its live Build ID again inside
+Frida, and runs strict single-pass 5,120-primitive and
+5,632-primitive-plus-object oracles. This is a portability gate,
+not a general claim that all API34 OEM ART builds work: any Build ID
+or table layout discrepancy is a hard failure. The API34 compiler
+native shim is intentionally not reused from API33.
+
+The general `watch.py` host now recognizes both allowlisted profiles,
+but no other API/architecture without equivalent runtime validation.
+
+## Base and split APK DEX catalogs
+
+The host CLI accepts repeatable `--apk` arguments. Provide the
+installed base APK first, followed by each split APK containing DEX
+in their expected loader order:
+
+```sh
+python3 art-fieldwatch-phase1/watch.py \
+  --apk base.apk --apk split_feature.apk \
+  --profile nterp-profile.json \
+  --process com.example.app --thread MyWorker \
+  --all-fields --duration 30 --output events.jsonl
+```
+
+The frontend merges the inventories into a single ordered catalog,
+remaps per-APK `dexId` indexes, and carries `dexLocation` such as
+`split_feature.apk!classes.dex` into observed field events. This
+preserves identity without assuming that a method index is globally
+unique across different DexFiles. It does not currently attest
+runtime class-loader ownership or code loaded after catalog creation:
+byte-equivalent candidate collisions fail closed where detectable.

@@ -15,9 +15,9 @@ abi="$(adb shell getprop ro.product.cpu.abi | tr -d '\r')"
       echo "pull-failed $source"
       continue
     fi
-    if [[ "$library" == libart.so && "$api" == 33 && "$abi" == x86_64 ]]; then
+    if [[ "$library" == libart.so && "$abi" == x86_64 && ( "$api" == 33 || "$api" == 34 ) ]]; then
       python3 art-fieldwatch-phase1/ci/nterp_profile.py "$tmp/$library" \
-        --out "$out/nterp-profile.json" ||
+        --api "$api" --out "$out/nterp-profile.json" ||
         echo "NTERP_PROFILE_UNAVAILABLE: stock ART table could not be certified"
     fi
     echo "=== $library ==="

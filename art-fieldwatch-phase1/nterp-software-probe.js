@@ -1,7 +1,8 @@
 'use strict';
 
 // EXPERIMENTAL stock ART nterp software handler instrumentation, not Java hooks.
-// Pinned profile: Android 13 API33 x86_64, exact ELF Build ID, 32-bit and 64-bit fields.
+// Strictly pinned Android 13/14 API33/34 x86_64 stock ART ELF Build IDs.
+// ABI is validated by the release oracle independently for every added build.
 // Per-worker-thread Stalker callouts observe selected field and successor handlers.
 // It observes nterp only. JIT/AOT/switch and native field accesses are not covered.
 //
@@ -11,6 +12,10 @@
 // the following handler at pc+4; failed null/resolution never reaches it.
 // The result is sampled at that next opcode, never by re-reading the field.
 const profile = globalThis.__artwatchNterpProfile;
+const knownBuildIds=Object.freeze({
+  33:'c8b6a2df9893030c07b3b96dc24a7d30',
+  34:'b6dc79e02101ea00827a35a55ab6597a'
+});
 const catalog = globalThis.__artwatchNterpCatalog;
 const selectors = globalThis.__artwatchNterpSelectors;
 const threadFilter = globalThis.__artwatchNterpThreadFilter;
@@ -220,6 +225,8 @@ function selectFieldSites(data, selectors) {
         fieldType:field.fieldType,opcode,kind,fieldId:field.fieldIndex,
         methodIndex:field.methodIndex,dexPc:field.dexPc,
         dexId:dex.dexId,dexSha256:dex.sha256,
+        dexName:dex.name ?? null,
+        dexLocation:dex.dexLocation ?? dex.name ?? null,
         registersSize:src.registersSize,
         sourceFile:field.sourceFile ?? null,
         sourceLine:field.sourceLine ?? null
@@ -235,7 +242,8 @@ function selectFieldSites(data, selectors) {
 }
 function install() {
   if (!['allPrimitives','allFields'].includes(opcodeGroup) || !profile ||
-      profile.api !== 33 || profile.architecture !== 'x86_64' ||
+      !Object.hasOwn(knownBuildIds,profile.api) ||
+      profile.architecture !== 'x86_64' ||
       Process.arch !== 'x64' || Process.pointerSize !== 8 ||
       profile.handlerSize !== 128 || profile.opcodeCount !== 256)
     throw new Error('Unsupported nterp software dispatcher ABI');
@@ -248,7 +256,7 @@ function install() {
   if (!art) throw new Error('No live libart.so module');
   const buildId=readLiveBuildId(art);
   if (buildId!==profile.buildId ||
-      buildId!=='c8b6a2df9893030c07b3b96dc24a7d30')
+      buildId!==knownBuildIds[profile.api])
     throw new Error('Unsupported exact stock ART build ID');
   if (!Number.isInteger(profile.startOffset) ||
       !Number.isInteger(profile.endOffset) ||
@@ -376,6 +384,7 @@ function install() {
       fieldName:f.fieldName,fieldType:f.fieldType,
       valueRepresentation:representation(f.fieldType),
       dexId:f.dexId,dexSha256:f.dexSha256,
+      dexName:f.dexName,dexLocation:f.dexLocation,
       methodIndex:f.methodIndex,fieldIndex:f.fieldId,dexPc:f.dexPc,
       dexPcSource:'live instruction base verified against packaged DEX bytes',
       runtimeMethodAddress:p.method.toString(),

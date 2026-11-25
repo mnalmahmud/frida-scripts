@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Resolve the actual nterp dispatch table from a pulled stock libart ELF.
 
-No in-process pattern search or guessed addresses. Experimental API33 x86_64
-backend only: all other binary builds must be validated independently.
+No in-process pattern search or guessed addresses. Only ABI-checked
+x86_64 ART build IDs present on our non-debuggable Android emulator matrix
+are accepted. New versions require an explicit audited allowlist entry.
 """
 import argparse
 import json
@@ -11,15 +12,22 @@ import subprocess
 from pathlib import Path
 
 EXPECTED_BUILD_ID = "c8b6a2df9893030c07b3b96dc24a7d30"
+KNOWN_BUILD_IDS = {
+    33: EXPECTED_BUILD_ID,
+    34: "b6dc79e02101ea00827a35a55ab6597a",
+}
 HANDLER_SIZE = 128
 OPCODES = 256
 SYMBOLS = ("artNterpAsmInstructionStart", "artNterpAsmInstructionEnd")
 
 
-def resolve(symbol_table, notes, header):
+def resolve(symbol_table, notes, header, api=33):
+    expected_build = KNOWN_BUILD_IDS.get(api)
+    if not expected_build:
+        raise ValueError("Unsupported Android API for pinned nterp backend")
     build = re.search(r"Build ID:\s*([a-fA-F0-9]+)", notes)
-    if not build or build.group(1).lower() != EXPECTED_BUILD_ID:
-        raise ValueError("Unsupported libart.so GNU Build ID")
+    if not build or build.group(1).lower() != expected_build:
+        raise ValueError(f"Unsupported libart.so GNU Build ID on API {api}")
     if not re.search(r"Machine:\s*Advanced Micro Devices X86-64", header):
         raise ValueError("Not x86_64 ART")
     if not re.search(r"Type:\s*DYN\b", header):
@@ -41,7 +49,7 @@ def resolve(symbol_table, notes, header):
     if start == 0 or end - start != OPCODES * HANDLER_SIZE:
         raise ValueError("Unexpected nterp opcode table span")
     return {"schemaVersion": 1, "architecture": "x86_64",
-            "api": 33, "buildId": EXPECTED_BUILD_ID,
+            "api": api, "buildId": expected_build,
             "startOffset": start, "endOffset": end,
             "handlerSize": HANDLER_SIZE, "opcodeCount": OPCODES}
 
@@ -53,6 +61,15 @@ def self_test():
     note = "Build ID: " + EXPECTED_BUILD_ID
     header = "Type: DYN (Shared object file)\nMachine: Advanced Micro Devices X86-64"
     assert resolve(table, note, header)["handlerSize"] == 128
+    assert resolve(table, "Build ID: "+KNOWN_BUILD_IDS[34], header,
+                   api=34)["api"]==34
+    for rejected_api in (21, 32, 35, 37):
+        try:resolve(table,note,header,api=rejected_api)
+        except ValueError:pass
+        else:raise AssertionError("Unverified Android nterp version accepted")
+    try:resolve(table,note,header,api=34)
+    except ValueError:pass
+    else:raise AssertionError("Wrong API34 ART binary identity accepted")
     for invalid in (table[:-2], table.replace("100000", "100001"),
                     table.replace(SYMBOLS[1], SYMBOLS[0])):
         try:
@@ -74,6 +91,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("libart", nargs="?", type=Path)
     parser.add_argument("--out", type=Path)
+    parser.add_argument("--api", type=int, choices=sorted(KNOWN_BUILD_IDS),
+                        default=33)
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
     if args.self_test:
@@ -84,7 +103,7 @@ def main():
     def elf(*options):
         return subprocess.check_output(["readelf", *options, str(args.libart)],
                                        text=True)
-    result = resolve(elf("--wide", "-Ws"), elf("-n"), elf("-h"))
+    result = resolve(elf("--wide", "-Ws"), elf("-n"), elf("-h"), api=args.api)
     args.out.write_text(json.dumps(result, indent=2) + "\n")
     print("Verified nterp opcode table:", json.dumps(result, sort_keys=True))
 

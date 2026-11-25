@@ -51,6 +51,8 @@ jobs:
         include:
           - api: 33
             variant: release
+          - api: 34
+            variant: release
           - api: 33
             variant: debug
           - api: 34
@@ -61,6 +63,7 @@ jobs:
       ARTWATCH_LOG_DIR: /tmp/artwatch-logs
       ARTWATCH_REQUIRE_JIT: '1'
       ARTWATCH_SHADOW_SHIM: ${{ matrix.api == 33 && '1' || '0' }}
+      ARTWATCH_NTERP_ONLY: ${{ matrix.api == 34 && matrix.variant == 'release' && '1' || '0' }}
       ARTWATCH_P3_INJECT: ${{ matrix.api == 33 && '1' || '0' }}
     steps:
       - uses: actions/checkout@v4
