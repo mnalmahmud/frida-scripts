@@ -61,14 +61,15 @@ def main():
     apk=ROOT/"test/app/build/outputs/apk/release/app-release.apk"
     if not apk.exists():
         raise FileNotFoundError(apk)
-    selectors=[
-        parse_selector(OWNER+"#writeInstance#value"),
-        parse_selector(OWNER+"#readInstance#value")
-    ]
+    # ART compiled the 40k-iteration caller, not its trivial reflective
+    # leaf methods. Verify the volatile field in that genuinely JIT-compiled
+    # caller so optimizing ART retains both read and write operations.
+    selectors=[parse_selector(OWNER+"#exerciseJitFieldCanary#jitVolatile")]
     catalog=select_catalog(inventory_packages([apk]),selectors)
     fields=[f for d in catalog["dexFiles"] for f in d["fieldAccesses"]]
-    if len(fields)!=2 or sorted(f["opcode"] for f in fields)!=["0x52","0x59"]:
-        raise AssertionError("Missing two exact JIT leaf DEX field accesses")
+    if (len(fields)!=2 or sorted(f["opcode"] for f in fields)!=["0x52","0x59"] or
+            {f["operation"] for f in fields}!={"read","write"}):
+        raise AssertionError("Missing two exact hot JIT caller DEX field accesses")
     adb("shell","am","force-stop",PACKAGE)
     adb("logcat","-c")
     adb("shell","am","start","-W","-n",ACTIVITY)

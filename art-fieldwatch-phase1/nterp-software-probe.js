@@ -13,6 +13,9 @@
 // The result is sampled at that next opcode, never by re-reading the field.
 const profile = globalThis.__artwatchNterpProfile;
 const arm64Experimental = globalThis.__artwatchExperimentalArm64 === true;
+const referenceIdentityEnabled =
+  globalThis.__artwatchReferenceIdentity === true;
+let identityLedger = null;
 const isArm64 = profile?.architecture === 'arm64';
 const knownBuildIds=Object.freeze({
   33:'c8b6a2df9893030c07b3b96dc24a7d30',
@@ -302,6 +305,14 @@ function install() {
   if (buildId!==profile.buildId ||
       (pinnedX64 && buildId!==knownBuildIds[profile.api]))
     throw new Error('Unsupported exact stock ART build ID');
+  if (referenceIdentityEnabled) {
+    if (!pinnedX64 || profile.api!==33 ||
+        typeof globalThis.__artwatchMakeReferenceLedger!=='function')
+      throw new Error('Reference identity requires opt-in API33 x64 JNI bridge');
+    identityLedger=globalThis.__artwatchMakeReferenceLedger(art,256);
+    if (identityLedger.expectedBuildId!==buildId)
+      throw new Error('JNI root bridge ART build ID mismatch');
+  }
   if (!Number.isInteger(profile.startOffset) ||
       !Number.isInteger(profile.endOffset) ||
       profile.endOffset-profile.startOffset!==32768 ||
@@ -421,6 +432,9 @@ function install() {
     const value=f.kind===1 ?
       readVreg(frame,f.vreg,f.fieldType,f.registersSize,refs) : f.preValue;
     if (records.length>=MAX_RECORDS) {dropped++;return;}
+    const isReference=f.fieldType.startsWith('L') || f.fieldType.startsWith('[');
+    const identity=(identityLedger && isReference)
+      ? identityLedger.observe(value) : null;
     if (nextSequence<8)
       send({type:'artwatch-nterp-software-record-sample',
         number:nextSequence+1,method:f.name,value});
@@ -438,10 +452,13 @@ function install() {
       sourceFile:f.sourceFile,sourceLine:f.sourceLine,
       opcode:f.opcode,kind:f.kind,value,instructionAddress:p.pc.toString(),
       provenance:'nterp Stalker opcode callout and succeeding opcode',
-      ...(f.fieldType.startsWith('L') || f.fieldType.startsWith('[')
+      ...(isReference
         ? {referenceIsNull:value==='0x00000000',
            referenceSnapshotGcStable:false,
-           referenceScope:'single-nterp-opcode-completion'} : {})
+           referenceScope:'single-nterp-opcode-completion',
+           ...(identity ? {referenceIdentityId:identity.id,
+              referenceIdentityGcStable:identity.stable,
+              referenceIdentityKind:'jni-weak-global'} : {})} : {})
     });
     if (streamBatchSize>0 && records.length>=streamBatchSize) {
       // Frida send() is async; one message per 128 completed accesses is
@@ -590,6 +607,13 @@ rpc.exports={
     try {Stalker.garbageCollect();} catch(_){}
     watchedThreadIds.clear();
     pendingByThread.clear();
+    if (identityLedger!==null) {
+      try {identityLedger.stop();identityLedger=null;}
+      catch(e) {
+        failures++;
+        recordDiagnostic('Cannot release JNI weak reference roots: '+e);
+      }
+    }
     return {removed,failures,recorded:nextSequence};
   },
   // Host-side consumers can stream events without overflowing the bounded
@@ -612,6 +636,8 @@ rpc.exports={
       abandonedFieldAttempts,pending:pendingByThread.size,
       dropped,events:records,totalRecorded:nextSequence,
       queued:records.length,streamBatchSize,batchesSent,eventsSent,
+      referenceIdentityEnabled,
+      referenceIdentity:identityLedger===null ? null : identityLedger.snapshot(),
       errors:diagnostics,
       threadsFollowed:followedCount,
       attachedHooks:stalkedThreads.size?knownHookCount:0

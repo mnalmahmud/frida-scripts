@@ -38,6 +38,12 @@ abi="$(adb shell getprop ro.product.cpu.abi | tr -d '\r')"
     readelf -n "$tmp/$library" 2>&1 | grep -i -m 1 'Build ID:' || true
     echo "-- available symbol sections --"
     readelf -SW "$tmp/$library" 2>&1 | grep -E ' (\.symtab|\.dynsym|\.debug_info|\.gnu_debugdata) ' || true
+    if [[ "$library" == libart.so ]]; then
+      echo "-- JNI managed reference bridge ABI candidates --"
+      readelf -Ws "$tmp/$library" 2>&1 |
+        grep -E '(JNI_GetCreatedJavaVMs|JNIEnvExt.*NewLocalRef|JNIEnvExt.*AddLocalReference)' |
+        head -n 50 || true
+    fi
     echo "-- targeted symbols (dynamic and full, if available) --"
     readelf -Ws "$tmp/$library" 2>&1 |
       grep -E 'HGraphBuilder|OptimizingCompiler|TryCompile|RunOptimizations|PassObserver|JitCompiler.*CompileMethod|jit_load|CompileMethodInternal|BuildInstanceFieldAccess|BuildStaticFieldAccess|HInstanceField(Get|Set)|HStaticField(Get|Set)' |

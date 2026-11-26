@@ -3,6 +3,9 @@ package com.example.artfieldwatch;
 /** Pure Java workload, with no recorder or native dependency. */
 public final class NoTemplateTarget {
   private int value;
+  // Deliberate optimizer-resistant field canary: the volatile load/store
+  // must remain observable at the ART optimizing compiler backend.
+  private volatile int jitVolatile;
   private int other;
   private float floating;
   private long large;
@@ -56,6 +59,35 @@ public final class NoTemplateTarget {
   // Transport stress: 20,000 real field opcodes, substantially beyond the
   // agent's former 8,192-record snapshot limit. All exact values are
   // independently checked by Java and by the host JSONL verifier.
+  // GC-root identity workload. Only ordinary Java object iget/iput and
+  // sget/sput leaf methods, with no sink/callback in the target methods.
+  public static int exerciseGcReferences() {
+    NoTemplateTarget receiver = new NoTemplateTarget();
+    Object first = new Object();
+    Object second = new Object();
+    int checks = 0;
+    for (int i = 0; i < 128; i++) {
+      Object a = (i & 1) == 0 ? first : second;
+      Object b = (i & 1) == 0 ? second : first;
+      writeInstanceObject(receiver, a);
+      NoTemplateStaticState.writeStaticObject(b);
+      if (readInstanceObject(receiver) != a ||
+          NoTemplateStaticState.readStaticObject() != b)
+        throw new AssertionError("GC reference identity mismatch at " + i);
+      checks++;
+      if ((i & 15) == 15) {
+        // GC is requested, not guaranteed to move either object.
+        // The host verifies persistent JNI identity IDs across these rounds.
+        for (int j = 0; j < 64; j++) {
+          byte[] pressure = new byte[4096];
+          pressure[0] = (byte)j;
+        }
+        System.gc();
+      }
+    }
+    return checks;
+  }
+
   // Compiler/JIT backend canary. Reflection prevents the CALLER from
   // inlining these two leaf methods and forces actual ArtMethod invocations.
   // Neither leaf contains any explicit tracing or sink call; each has only
@@ -71,7 +103,11 @@ public final class NoTemplateTarget {
       int value = 17 + i * 3;
       setter.invoke(null, receiver, value);
       int observed = (Integer) getter.invoke(null, receiver);
-      if (observed != value)
+      // These are ordinary compiled DEX field operations in the *hot
+      // caller*, not separate leaves ART may decline to JIT.
+      receiver.jitVolatile = value;
+      int direct = receiver.jitVolatile;
+      if (observed != value || direct != value)
         throw new AssertionError("JIT field canary mismatch at " + i);
       checksum ^= observed;
     }

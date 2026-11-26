@@ -1298,3 +1298,38 @@ is *experimental*, not validated. Unlike x86_64, the ARM64 entry
 is dynamically pinned to the **actual pulled** ELF Build ID
 rather than a multi-device allowlist; it is deliberately not
 auto-enabled for unrelated apps/builds.
+
+## GC-stable object identity through JNI weak roots (experimental API33 x64)
+
+`--reference-identity` is an explicit opt-in to a new private ART/JNI
+bridge, separate from the default raw reference snapshotter. The
+bridge `jni-reference-ledger.js` starts **only after exact mapped
+ART Build-ID verification** on Android 33 x86_64 and resolves the
+private `JNIEnvExt::NewLocalRef(mirror::Object*)` entrypoint. It
+uses that ART-internal native method to turn a validated nterp
+reference-slot object pointer into a genuine JNI local handle,
+then immediately creates a **JNI weak global reference**, releases
+the local and assigns a monotonic `art-ref-N` ID. Subsequent
+field events use JNI `IsSameObject` against these weak roots;
+cleared weak roots are cleaned up, and all remaining references
+are released when monitoring stops.
+
+This is fundamentally different from (invalidly) passing a
+compressed 32-bit heap pointer directly to `JNIEnv->NewGlobalRef`.
+`NewGlobalRef` accepts a *JNI indirect reference*, not a raw ART
+`mirror::Object*`. The nterp value remains a transient 32-bit
+snapshot (`referenceSnapshotGcStable:false`), while the optional
+`referenceIdentityId` aims to provide a stable **identity** across
+moving collections (`referenceIdentityKind:jni-weak-global`).
+Weak references do not intentionally keep observed objects alive.
+
+The isolated `ci/run-gc-reference-smoke.py` release oracle
+executes 512 genuine object-field operations on two ordinary Java
+objects, with eight requested GC rounds, and checks that the two
+identity IDs remain distinct and stable across all reads/writes.
+Actual movement by the collector is **not** asserted, merely
+requested. The private `JNIEnvExt` entrypoint, compressed reference
+representation, and caller thread's JNI-transition state are
+ABI-sensitive. The feature remains **unverified and disabled by
+default** until the exact-device test succeeds; a missing export,
+invalid build, JNI error or excessive tracked objects fails closed.

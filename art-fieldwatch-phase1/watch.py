@@ -333,12 +333,18 @@ class CoverageTracker:
 
 
 def assemble_agent(catalog, profile, selectors, thread, group,
-                   experimental_arm64=False):
+                   experimental_arm64=False, reference_identity=False):
     if group not in ("allPrimitives", "allFields"):
         raise ValueError("Software Stalker supports only allPrimitives/allFields")
+    if reference_identity and (group!="allFields" or experimental_arm64 or
+                               profile.get("api")!=33 or
+                               profile.get("architecture")!="x86_64"):
+        raise ValueError("JNI reference identity is experimental API33 x64 only")
     if not thread or len(thread) > 128:
         raise ValueError("Thread name or * must be 1..128 characters")
-    source = (ROOT / "nterp-software-probe.js").read_text(encoding="utf-8")
+    source = ((ROOT / "jni-reference-ledger.js").read_text(encoding="utf-8")+
+              "\n" if reference_identity else "") + (
+              ROOT / "nterp-software-probe.js").read_text(encoding="utf-8")
     bindings = {
         "__artwatchNterpOpcodeGroup": group,
         "__artwatchNterpStreamBatchSize": 128,
@@ -347,6 +353,7 @@ def assemble_agent(catalog, profile, selectors, thread, group,
         "__artwatchNterpProfile": verify_profile(
             profile,experimental_arm64=experimental_arm64),
         "__artwatchExperimentalArm64": experimental_arm64,
+        "__artwatchReferenceIdentity": reference_identity,
         "__artwatchNterpCatalog": catalog,
     }
     # Serialize rather than interpolate selector text into JavaScript.
@@ -499,6 +506,14 @@ def self_test():
     assert '"Worker\\u0027' not in agent  # json.dumps uses escaped quotes
     assert 'globalThis.__artwatchNterpOpcodeGroup="allFields";' in agent
     assert 'globalThis.__artwatchNterpCatalog=' in agent
+    identity_agent=assemble_agent(filtered,profile,[example],
+                                  "Worker","allFields",reference_identity=True)
+    assert "__artwatchMakeReferenceLedger" in identity_agent
+    assert '__artwatchReferenceIdentity=true' in identity_agent
+    try:assemble_agent(filtered,profile,[example],"Worker",
+                       "allPrimitives",reference_identity=True)
+    except ValueError:pass
+    else:raise AssertionError("Ref identity permitted with no object opcodes")
     print("Generic ART nterp field watcher CLI self-test passed")
 
 
@@ -538,8 +553,10 @@ def watch(args):
         try: re.compile(args.thread_regex)
         except re.error as e:
             raise ValueError("Invalid thread selection regex") from e
+    reference_identity=getattr(args,"reference_identity",False)
     source=assemble_agent(catalog,profile,selectors,thread_selection,group,
-                          experimental_arm64=experimental_arm64)
+                          experimental_arm64=experimental_arm64,
+                          reference_identity=reference_identity)
 
     # Frida is imported only when actually running on a connected device;
     # static/unit tests do not require the mobile SDK or live device.
@@ -735,6 +752,9 @@ def main():
     parser.add_argument("--experimental-arm64",action="store_true",
                         help="Opt in to source-derived ARM64 API34 nterp ABI; "
                              "requires exact device ELF profile")
+    parser.add_argument("--reference-identity",action="store_true",
+                        help="Experimental API33 x64 JNI weak-root identity "
+                             "for observed object field events")
     parser.add_argument("--process",help="Existing process name/PID or spawn package")
     thread_selection=parser.add_mutually_exclusive_group()
     thread_selection.add_argument("--thread",

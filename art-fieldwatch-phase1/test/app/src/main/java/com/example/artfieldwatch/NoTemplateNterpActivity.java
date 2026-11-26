@@ -78,9 +78,23 @@ public final class NoTemplateNterpActivity extends Activity {
     final boolean overload = intent.getBooleanExtra("overload", false);
     final boolean streaming = intent.getBooleanExtra("streaming", false);
     final boolean jit = intent.getBooleanExtra("jit", false);
+    final boolean gcRefs = intent.getBooleanExtra("gcRefs", false);
     if ((!intent.getBooleanExtra("run", false) && !parallel && !overload &&
-         !streaming && !jit) || started) return;
+         !streaming && !jit && !gcRefs) || started) return;
     started = true;
+    if (gcRefs) {
+      new Thread(() -> {
+        try {
+          int checks = NoTemplateTarget.exerciseGcReferences();
+          if (checks != 128) throw new AssertionError("GC checks mismatch");
+          Log.i("ARTWATCH_NTERP_LAB",
+                "NTERP_LAB_GC_REFS_DONE checks=" + checks);
+        } catch (Throwable e) {
+          Log.e("ARTWATCH_NTERP_LAB", "NTERP_LAB_FAILED", e);
+        }
+      }, "NterpFieldProbe").start();
+      return;
+    }
     if (jit) {
       new Thread(() -> {
         try {
