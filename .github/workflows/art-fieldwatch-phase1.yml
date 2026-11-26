@@ -1,0 +1,203 @@
+name: ART Fieldwatch phase 1
+on:
+  pull_request:
+    paths: ['art-fieldwatch-phase1/**', '.github/workflows/art-fieldwatch-phase1.yml']
+  workflow_dispatch:
+    inputs:
+      arm64:
+        description: 'Run experimental arm64 JIT hook test'
+        type: boolean
+        default: false
+permissions:
+  contents: read
+# Older PR test matrices were overlapping on hosted runners, repeatedly
+# getting Maven Central HTTP 429. Only the newest run is authoritative.
+concurrency:
+  group: art-fieldwatch-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: node --check art-fieldwatch-phase1/jit-boundary-probe.js
+      - run: node --check art-fieldwatch-phase1/nterp-field-probe.js
+      - run: node --check art-fieldwatch-phase1/nterp-software-probe.js
+      - run: node --check art-fieldwatch-phase1/jit-field-emission-probe.js
+      - run: node --check art-fieldwatch-phase1/jni-reference-ledger.js
+      - run: node art-fieldwatch-phase1/ci/nterp_selection_test.js
+      - run: python3 art-fieldwatch-phase1/watch.py --self-test
+      - run: python3 art-fieldwatch-phase1/ci/stream_transport_test.py
+      - run: python3 -m py_compile art-fieldwatch-phase1/watch.py
+      - run: python3 -m py_compile art-fieldwatch-phase1/ci/run-generic-watch-smoke.py
+      - run: python3 -m py_compile art-fieldwatch-phase1/ci/run-generic-stream-smoke.py
+      - run: python3 -m py_compile art-fieldwatch-phase1/ci/run-jit-field-emission-smoke.py
+      - run: python3 -m py_compile art-fieldwatch-phase1/ci/run-gc-reference-smoke.py
+      - run: python3 art-fieldwatch-phase1/ci/nterp_profile.py --self-test
+      - run: python3 art-fieldwatch-phase1/ci/run-nterp-smoke.py --self-test
+      - run: python3 -m py_compile art-fieldwatch-phase1/ci/smoke_test.py
+      - run: python3 -m py_compile art-fieldwatch-phase1/ci/dex_method_index.py
+      - run: python3 art-fieldwatch-phase1/ci/dex_method_index.py --self-test
+      - run: python3 art-fieldwatch-phase1/ci/dex_field_sites.py --self-test
+      - run: python3 art-fieldwatch-phase1/ci/resolve_field_events.py --self-test
+      - run: python3 art-fieldwatch-phase1/ci/fixture_log.py
+      - run: node --check art-fieldwatch-phase1/lab/stock_fixture_oracle.js
+      - run: python3 art-fieldwatch-phase1/lab/run_stock_fixture_oracle.py --self-test
+      - run: bash -n art-fieldwatch-phase1/ci/run-emulator-smoke.sh
+      - run: bash -n art-fieldwatch-phase1/ci/dex-inventory.sh
+      - run: bash -n art-fieldwatch-phase1/ci/build-passive-shim.sh
+  android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      # Avoid three fresh Gradle/AGP dependency resolutions sharing the
+      # runner egress/IP at once, which triggers Maven Central HTTP 429.
+      max-parallel: 1
+      matrix:
+        include:
+          - api: 33
+            variant: release
+          - api: 34
+            variant: release
+          - api: 33
+            variant: debug
+          - api: 34
+            variant: debug
+    env:
+      FRIDA_VERSION: '17.27.1'
+      ARTWATCH_BUILD_VARIANT: ${{ matrix.variant }}
+      ARTWATCH_LOG_DIR: /tmp/artwatch-logs
+      ARTWATCH_REQUIRE_JIT: '1'
+      ARTWATCH_SHADOW_SHIM: ${{ matrix.api == 33 && '1' || '0' }}
+      ARTWATCH_NTERP_ONLY: ${{ matrix.api == 34 && matrix.variant == 'release' && '1' || '0' }}
+      ARTWATCH_P3_INJECT: ${{ matrix.api == 33 && '1' || '0' }}
+    steps:
+      - uses: actions/checkout@v4
+      # Emulator 37.3+ refuses -accel off without an explicit TCG override.
+      # GitHub-hosted Ubuntu runners support KVM once the device is accessible.
+      - name: Enable and verify KVM before installing the emulator
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -c /dev/kvm ]; then
+            echo "::error::No /dev/kvm device: cannot boot accelerated x86_64 emulator on this runner."
+            exit 1
+          fi
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' |
+            sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+          if [ ! -r /dev/kvm ] || [ ! -w /dev/kvm ]; then
+            echo "::error::/dev/kvm is not readable/writable by the runner."
+            exit 1
+          fi
+          echo "KVM device is accessible"
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: android-actions/setup-android@v4
+        with:
+          packages: 'platform-tools platforms;android-35 build-tools;35.0.0'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.10.2'
+      - name: Build API33 passive shadow shim
+        if: matrix.api == 33
+        run: bash art-fieldwatch-phase1/ci/build-passive-shim.sh
+      - name: Build selected APK variant
+        shell: bash
+        run: |
+          case "$ARTWATCH_BUILD_VARIANT" in
+            debug) task=assembleDebug ;;
+            release) task=assembleRelease ;;
+            *) exit 1 ;;
+          esac
+          # Maven/Google repositories occasionally return incomplete metadata
+          # on hosted runners. Retry the whole build, but fail normally after
+          # exhausting attempts; never suppress real compilation errors.
+          for attempt in 1 2 3; do
+            if gradle -p art-fieldwatch-phase1/test ":app:$task" --no-daemon; then
+              exit 0
+            fi
+            if (( attempt == 3 )); then
+              echo "::error::Gradle APK build failed after 3 attempts"
+              exit 1
+            fi
+            echo "::warning::Gradle build attempt $attempt/3 failed; retrying repository resolution"
+            sleep "$((attempt * 10))"
+          done
+      - name: Verify packaged native shadow library
+        if: matrix.api == 33
+        run: |
+          apk="art-fieldwatch-phase1/test/app/build/outputs/apk/$ARTWATCH_BUILD_VARIANT/app-$ARTWATCH_BUILD_VARIANT.apk"
+          unzip -l "$apk" | grep 'lib/x86_64/libartwatch_shadow.so'
+          unzip -l "$apk" | grep 'lib/x86_64/libartwatch_events.so'
+      - name: Record compiled fixture DEX for D8 comparison
+        run: bash art-fieldwatch-phase1/ci/dex-inventory.sh
+      - run: python3 -m pip install 'frida==17.27.1'
+      - name: Install official Frida CLI for the stock fixture oracle
+        if: matrix.api == 33 && matrix.variant == 'release'
+        run: python3 -m pip install 'frida==17.27.1' 'frida-tools==14.13.2'
+      - uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: ${{ matrix.api }}
+          target: default
+          arch: x86_64
+          profile: pixel_2
+          disable-linux-hw-accel: false
+          emulator-boot-timeout: 300
+          script: bash art-fieldwatch-phase1/ci/run-emulator-smoke.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: artwatch-api${{ matrix.api }}-x86_64-${{ matrix.variant }}
+          path: /tmp/artwatch-logs/
+          if-no-files-found: ignore
+  android-arm64:
+    # Deliberately exercise real ARM64 ART on Apple Silicon; an opt-in
+    # workflow_dispatch remains available for reruns outside PR CI.
+    if: github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.arm64)
+    runs-on: macos-15
+    timeout-minutes: 45
+    env:
+      FRIDA_VERSION: '17.27.1'
+      ARTWATCH_LOG_DIR: /tmp/artwatch-logs
+      ARTWATCH_BUILD_VARIANT: release
+      ARTWATCH_ARM64_ONLY: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: android-actions/setup-android@v4
+        with:
+          packages: 'platform-tools platforms;android-35 build-tools;35.0.0'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.10.2'
+      - run: brew install binutils
+      - run: gradle -p art-fieldwatch-phase1/test :app:assembleRelease --no-daemon
+      - run: python3 -m pip install 'frida==17.27.1'
+      - uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          target: google_apis
+          arch: arm64-v8a
+          profile: pixel_2
+          script: bash art-fieldwatch-phase1/ci/run-emulator-smoke.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: artwatch-api34-arm64
+          path: /tmp/artwatch-logs/
+          if-no-files-found: ignore
