@@ -153,9 +153,9 @@ def run(mode,folder):
         get_usb_device=lambda timeout:Device(mode)
     )
     with patch.dict(sys.modules,{"frida":fake_frida}), \
-         patch.object(watch,"discover_device_profile",lambda:profile()), \
+         patch.object(watch,"discover_device_profile",lambda **kwargs:profile()), \
          patch.object(watch,"inventory_packages",lambda apks:catalog()), \
-         patch.object(watch,"assemble_agent",lambda *a:"__artwatchNterpStreamBatchSize"):
+         patch.object(watch,"assemble_agent",lambda *a,**kwargs:"__artwatchNterpStreamBatchSize"):
         if mode=="duplicate":
             try:
                 watch.watch(args)
