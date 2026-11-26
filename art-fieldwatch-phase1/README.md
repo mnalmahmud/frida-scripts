@@ -1204,3 +1204,30 @@ a fail-closed duplicate/gap check, then verifies the final agent
 release oracle remains the acceptance criterion. Batching reduces
 pressure on the in-process ring; this is not a guarantee of
 unbounded-rate/lossless monitoring without backpressure.
+
+## Read-only or write-only DEX site selection
+
+The generic host supports `--operation read` or `--operation write`,
+or the default `--operation both`, with `--watch-field`,
+`--field` and `--all-fields`. This filters opcode sites in the
+verified packaged DEX catalog **before** initializing the Stalker
+rather than discarding events after interception. Per-method
+instruction streams and the original DEX IDs remain unchanged, and
+the coverage report counts only the selected read or write sites.
+
+Example: `--watch-field 'Lcom/example/Account;#balance' --operation write`
+watches successful stores to that declared field from every selected
+DEX caller on followed threads; compiled, JNI and dynamic-code
+stores remain outside the nterp-only scope.
+
+## Asynchronous event-delivery regression test
+
+`ci/stream_transport_test.py` runs the real generic `watch.watch()`
+host pipeline using a minimal mocked Frida device/agent. It delivers
+the first two 128-style batches in reverse order, then returns a
+trailing event through the ordinary `drain()` RPC. The oracle
+requires contiguous ordered JSONL output and exact per-DEX-site
+coverage counts, and separately verifies that a duplicate event
+sequence causes a hard error. It does not fake an ART runtime result:
+the separate Android 33/34 20,000-event release workloads are
+required to verify actual Frida/Stalker performance and safety.

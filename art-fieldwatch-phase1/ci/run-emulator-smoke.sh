@@ -119,6 +119,8 @@ if [[ "$variant" == release && "${ARTWATCH_SHADOW_SHIM:-0}" == 1 ]]; then
   # Exercise the public CLI with a live device-derived ART ELF profile.
   adb shell am force-stop com.example.artfieldwatch
   python3 art-fieldwatch-phase1/ci/run-generic-watch-smoke.py
+  adb shell am force-stop com.example.artfieldwatch
+  ARTWATCH_OPERATION=write python3 art-fieldwatch-phase1/ci/run-generic-watch-smoke.py
   # Sustained exact-value transport oracle: stream 20k real nterp field
   # opcodes, beyond the 8192-record fixed snapshot queue capacity.
   adb shell am force-stop com.example.artfieldwatch
@@ -143,6 +145,8 @@ if [[ "$variant" == release && "${ARTWATCH_NTERP_ONLY:-0}" == 1 ]]; then
   # Exercise the public CLI with a live device-derived ART ELF profile.
   adb shell am force-stop com.example.artfieldwatch
   python3 art-fieldwatch-phase1/ci/run-generic-watch-smoke.py
+  adb shell am force-stop com.example.artfieldwatch
+  ARTWATCH_OPERATION=write python3 art-fieldwatch-phase1/ci/run-generic-watch-smoke.py
   # Sustained exact-value transport oracle: stream 20k real nterp field
   # opcodes, beyond the 8192-record fixed snapshot queue capacity.
   adb shell am force-stop com.example.artfieldwatch

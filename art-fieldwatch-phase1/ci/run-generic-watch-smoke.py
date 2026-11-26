@@ -29,6 +29,9 @@ def lab_log(pid):
 def main():
     if os.environ.get("ARTWATCH_BUILD_VARIANT")!="release":
         raise AssertionError("Generic field watcher only tests non-debuggable release APK")
+    operation=os.environ.get("ARTWATCH_OPERATION","both")
+    if operation not in ("both","write"):
+        raise ValueError("Only both and write supported in generic field oracle")
     root=Path(os.environ.get("ARTWATCH_LOG_DIR","/tmp/artwatch-logs"))
     root.mkdir(parents=True,exist_ok=True)
     apk=BASE/"test"/"app"/"build"/"outputs"/"apk"/"release"/"app-release.apk"
@@ -49,13 +52,15 @@ def main():
     else:
         raise AssertionError("No isolated nterp process for generic watcher")
     pid=pids.split()[0]
-    out=root/"generic-fieldwatch-overload.jsonl"
-    coverage=root/"generic-fieldwatch-overload-coverage.json"
-    stderr=root/"generic-fieldwatch-overload-host.log"
+    suffix=("" if operation=="both" else "-"+operation)
+    out=root/("generic-fieldwatch-overload"+suffix+".jsonl")
+    coverage=root/("generic-fieldwatch-overload"+suffix+"-coverage.json")
+    stderr=root/("generic-fieldwatch-overload"+suffix+"-host.log")
     cmd=[sys.executable,str(BASE/"watch.py"),
          "--apk",str(apk),"--auto-profile",
          "--process",pid,"--thread","NterpFieldProbe",
          "--duration","15","--poll-ms","50",
+         "--operation",operation,
          "--output",str(out),"--coverage-output",str(coverage)]
     # Select the FIELD itself, across every DEX caller method. There
     # are more eligible packaged sites than the four workload overloads,
@@ -101,37 +106,55 @@ def main():
             raise AssertionError("Generic watcher exited with "+
                                  str(return_code)+": "+stderr.read_text()[-4000:])
     rows=[json.loads(line) for line in out.read_text().splitlines() if line]
-    if len(rows)!=512:
-        raise AssertionError(f"Expected 512 JSONL field events, got {len(rows)}")
-    for i in range(128):
-        for j,(name,proto,opcode,kind) in enumerate(SITES):
-            row=rows[4*i+j]
-            expected_value=100+i if j<2 else -200-i
-            required={
-                "seq":4*i+j+1,"method":name,"methodPrototype":proto,
-                "methodClass":OWNER,"fieldName":"value",
-                "fieldType":"I","value":expected_value,"opcode":opcode,
-                "kind":kind,"valueRepresentation":"signed-int32",
-                "dexPcSource":"live instruction base verified against packaged DEX bytes",
-            }
-            for key,value in required.items():
-                if row.get(key)!=value:
-                    raise AssertionError(
-                        f"Generic watcher event i={i} j={j}: "
-                        f"{key} {row.get(key)!r} != {value!r}")
+    if operation=="both":
+        expected=[
+            (name,proto,opcode,kind,
+             (100+i if j<2 else -200-i))
+            for i in range(128)
+            for j,(name,proto,opcode,kind) in enumerate(SITES)]
+    else:
+        expected=[
+            (name,proto,opcode,kind,
+             (100+i if j==0 else -200-i))
+            for i in range(128)
+            for j,(name,proto,opcode,kind) in enumerate(SITES)
+            if kind==2]
+    if len(rows)!=len(expected):
+        raise AssertionError(
+            f"Expected {len(expected)} {operation} field events, got {len(rows)}")
+    for i,(name,proto,opcode,kind,expected_value) in enumerate(expected):
+        row=rows[i]
+        required={
+            "seq":i+1,"method":name,"methodPrototype":proto,
+            "methodClass":OWNER,"fieldName":"value",
+            "fieldType":"I","value":expected_value,"opcode":opcode,
+            "kind":kind,"valueRepresentation":"signed-int32",
+            "dexPcSource":"live instruction base verified against packaged DEX bytes",
+        }
+        for key,value in required.items():
+            if row.get(key)!=value:
+                raise AssertionError(
+                    f"Generic watcher event i={i} operation={operation} "
+                    f"{key}: {row.get(key)!r} != {value!r}")
     summary=json.loads(coverage.read_text())
     selected=summary["totalSelectedSites"]
     nonzero=sorted(site["observedCount"] for site in summary["sites"]
                    if site["observedCount"])
-    if (summary["observedEvents"]!=512 or
-            selected<4 or summary["observedSites"]!=4 or
-            summary["unobservedSites"]!=selected-4 or
-            nonzero != [128]*4 or
-            any(site["declaringClass"]!=OWNER for site in
-                summary["sites"])):
-        raise AssertionError("Declaring-field watcher coverage report incorrect")
-    print("PASS: generic watch.py --auto-profile streamed 512 exact "
-          "overloaded nterp field events with four fully observed DEX sites")
+    want_sites=4 if operation=="both" else 2
+    if (summary["observedEvents"]!=len(expected) or
+            selected<want_sites or
+            summary["observedSites"]!=want_sites or
+            summary["unobservedSites"]!=selected-want_sites or
+            nonzero != [128]*want_sites or
+            any(site["declaringClass"]!=OWNER for site in summary["sites"]) or
+            (operation=="write" and
+             any(site["opcode"] not in ("0x59","0x67") for site in
+                 summary["sites"]))):
+        raise AssertionError(
+            "Declaring-field operation coverage report incorrect")
+    print(f"PASS: generic watch.py --auto-profile streamed "
+          f"{len(expected)} exact {operation} nterp field events with "
+          f"{want_sites} observed DEX sites")
 
 if __name__=="__main__":
     main()

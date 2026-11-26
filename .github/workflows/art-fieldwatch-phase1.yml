@@ -25,6 +25,7 @@ jobs:
       - run: node --check art-fieldwatch-phase1/nterp-software-probe.js
       - run: node art-fieldwatch-phase1/ci/nterp_selection_test.js
       - run: python3 art-fieldwatch-phase1/watch.py --self-test
+      - run: python3 art-fieldwatch-phase1/ci/stream_transport_test.py
       - run: python3 -m py_compile art-fieldwatch-phase1/watch.py
       - run: python3 -m py_compile art-fieldwatch-phase1/ci/run-generic-watch-smoke.py
       - run: python3 -m py_compile art-fieldwatch-phase1/ci/run-generic-stream-smoke.py

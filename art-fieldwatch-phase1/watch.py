@@ -232,6 +232,30 @@ def select_catalog_by_declared_fields(catalog, field_selectors):
     return result
 
 
+def select_operations(catalog, operation):
+    """Restrict the verified DEX site catalog to successful access direction.
+
+    The runtime agent still verifies complete method DEX bytes. Filtering
+    happens before instrumentation rather than dropping matching callback
+    records on the host.
+    """
+    if operation not in ("both","read","write"):
+        raise ValueError("Expected field operation: both/read/write")
+    if operation=="both":
+        return catalog
+    result=copy.deepcopy(catalog)
+    for dex in result["dexFiles"]:
+        selected=[site for site in dex["fieldAccesses"]
+                  if site["operation"]==operation]
+        methods={site["methodIndex"] for site in selected}
+        dex["fieldAccesses"]=selected
+        dex["fieldMethods"]=[m for m in dex["fieldMethods"]
+                             if m["methodIndex"] in methods]
+        dex["count"]=len(selected)
+    result["totalFieldSites"]=sum(dex["count"] for dex in result["dexFiles"])
+    return result
+
+
 class CoverageTracker:
     """Report observed nterp sites without claiming executed-code coverage."""
     def __init__(self,catalog,include_object=True):
@@ -380,6 +404,22 @@ def self_test():
         site["fieldName"] = "count"
     filtered_multi = select_catalog_by_declared_fields(multi,[declared])
     assert filtered_multi["totalFieldSites"]==2
+    # Exercise operation-specific catalog pruning without touching the source.
+    for j,site in enumerate(multi["dexFiles"][0]["fieldAccesses"]):
+        site["operation"]="write" if j==0 else "read"
+    writes=select_operations(multi,"write")
+    reads=select_operations(multi,"read")
+    assert len(writes["dexFiles"][0]["fieldAccesses"])==1
+    assert writes["dexFiles"][0]["fieldAccesses"][0]["methodIndex"]==1
+    assert len(reads["dexFiles"][0]["fieldAccesses"])==1
+    assert reads["dexFiles"][0]["fieldAccesses"][0]["methodIndex"]==2
+    assert len(writes["dexFiles"][0]["fieldMethods"])==1
+    assert len(reads["dexFiles"][0]["fieldMethods"])==1
+    assert multi["totalFieldSites"]==2
+    assert select_operations(multi,"both") is multi
+    try:select_operations(multi,"maybe")
+    except ValueError:pass
+    else:raise AssertionError("Invalid field operation selector accepted")
     assert len(filtered_multi["dexFiles"][0]["fieldMethods"])==2
     assert filtered_multi["dexFiles"][0]["fieldAccesses"][0][
         "methodClass"] != filtered_multi["dexFiles"][0]["fieldAccesses"][1][
@@ -449,8 +489,9 @@ def watch(args):
             full_catalog, declaring_fields)
     else:
         catalog = select_catalog(full_catalog, selectors)
+    catalog = select_operations(catalog,args.operation)
     if not catalog["totalFieldSites"]:
-        raise ValueError("No field instructions were found in the APK")
+        raise ValueError("No matching field instructions were found in the APK")
     thread_selection=('regex:'+args.thread_regex
                       if args.thread_regex is not None else args.thread)
     if args.thread_regex is not None:
@@ -665,6 +706,9 @@ def main():
                            help="Explicitly select all packaged DEX field sites")
     parser.add_argument("--primitives-only",action="store_true",
                         help="Exclude reference-field opcodes")
+    parser.add_argument("--operation",choices=("both","read","write"),
+                        default="both",
+                        help="Watch reads, writes, or both (default)")
     parser.add_argument("--spawn",action="store_true",
                         help="Spawn package paused, attach+arm, then resume")
     parser.add_argument("--duration",type=float,default=20.0,
