@@ -1176,7 +1176,31 @@ for independently named Java worker pools and avoids forcing a
 potentially dangerous all-thread follow.
 
 The two-worker Android runtime oracle now names the workers
-`NterpFieldProbe-0` and `NterpFieldProbe-1`, selects them both
+`NterpProbe-0` and `NterpProbe-1`, selects them both
 with `regex:^NterpFieldProbe-[01]$`, and requires 256 exact field
 operations from each thread. This does not establish safety for
 arbitrary non-Java/GC/Frida threads or compiled instructions.
+
+## Streaming and worker-name fixes (2026-11-27)
+
+CI run 45692194383 identified two independent regressions:
+the Android Linux task `comm` name is limited to 15 bytes, so
+`NterpFieldProbe-0/-1` was truncated and never matched the
+`regex:` filter; and the 20,000-field-operation workload overflowed
+the 8,192-record buffer by 3,670 events before a host RPC poll.
+
+The worker-thread experiment now uses `NterpProbe-0/-1`
+(12/12 bytes) and matches precisely those names. The *public CLI*
+enables batched asynchronous Frida `send()` transport, batching
+128 completed field events per message. Non-CLI synthetic snapshot
+tests still use the original RPC/snapshot mode, so their verifiers
+are unaffected.
+
+The Python host queues delivered batches without doing I/O in
+Frida's callback, merges RPC-tail records into a single sequence,
+flushes only contiguous sequence IDs, enforces a bounded queue and
+a fail-closed duplicate/gap check, then verifies the final agent
+`totalRecorded` count. The strict 20,000-operation Android 33/34
+release oracle remains the acceptance criterion. Batching reduces
+pressure on the in-process ring; this is not a guarantee of
+unbounded-rate/lossless monitoring without backpressure.

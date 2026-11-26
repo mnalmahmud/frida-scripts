@@ -17,6 +17,7 @@ import copy
 import json
 import os
 import re
+import queue
 import subprocess
 import sys
 import tempfile
@@ -294,6 +295,7 @@ def assemble_agent(catalog, profile, selectors, thread, group):
     source = (ROOT / "nterp-software-probe.js").read_text(encoding="utf-8")
     bindings = {
         "__artwatchNterpOpcodeGroup": group,
+        "__artwatchNterpStreamBatchSize": 128,
         "__artwatchNterpThreadFilter": thread,
         "__artwatchNterpSelectors": selectors,
         "__artwatchNterpProfile": verify_profile(profile),
@@ -471,34 +473,102 @@ def watch(args):
     target=args.process if not args.process.isdigit() else int(args.process)
     stream=open(args.output,"w",encoding="utf-8") if args.output else sys.stdout
     coverage=CoverageTracker(catalog,include_object=not args.primitives_only)
+    incoming=queue.Queue(maxsize=512)
+    pending_events={}
+    error_overflow=[]
 
+    # The Frida message callback may run off the host's main thread. It does
+    # not write JSONL, mutate the coverage report, or call any RPC. It only
+    # queues complete immutable event batches for the single host consumer.
     def on_message(message, unused):
         if message.get("type") == "error":
             errors.append(message.get("stack") or str(message))
-        else:
-            item=message.get("payload")
-            if isinstance(item,dict) and item.get("type") in (
-                    "artwatch-nterp-stalker-error",
-                    "artwatch-nterp-software-error"):
-                errors.append(item.get("error") or repr(item))
+            return
+        item=message.get("payload")
+        if isinstance(item,dict) and item.get("type") in (
+                "artwatch-nterp-stalker-error",
+                "artwatch-nterp-software-error"):
+            errors.append(item.get("error") or repr(item))
+        elif isinstance(item,dict) and item.get("type") == (
+                "artwatch-nterp-record-batch"):
+            events=item.get("events")
+            if not isinstance(events,list) or not events:
+                errors.append("Malformed nterp event batch")
+                return
+            try:
+                incoming.put_nowait(events)
+            except queue.Full:
+                error_overflow.append("Host event message queue is full")
+
+    def check_agent(item):
+        if item["errors"] or item["dropped"] or item["unverifiedSites"]:
+            raise RuntimeError("Field instrumentation did not remain lossless: "+
+                               repr({k:item[k] for k in (
+                                   "errors","dropped","unverifiedSites")}))
+
+    def accept_events(events):
+        for event in events:
+            seq=event.get("seq")
+            if not isinstance(seq,int) or seq<=produced or seq in pending_events:
+                raise RuntimeError("Duplicate or out-of-order sequence in event stream")
+            if len(pending_events)>=131072:
+                raise RuntimeError("Too many pending out-of-order field records")
+            pending_events[seq]=event
+
+    def flush_ordered():
+        nonlocal produced
+        while (produced+1) in pending_events:
+            event=pending_events.pop(produced+1)
+            if event.get("dexPcSource") != PROVENANCE:
+                raise RuntimeError("Runtime DEX identity was not verified")
+            coverage.observe(event)
+            stream.write(json.dumps(event,sort_keys=True)+"\n")
+            produced+=1
+        stream.flush()
+
+    def pump_messages():
+        while True:
+            try:
+                batch=incoming.get_nowait()
+            except queue.Empty:
+                break
+            accept_events(batch)
+        if error_overflow:
+            raise RuntimeError(error_overflow[0])
+        if errors:
+            raise RuntimeError("Frida errors: "+"; ".join(errors))
+        flush_ordered()
 
     def drain():
-        nonlocal produced
+        # RPC events contain only the not-yet-sent tail when stream mode
+        # is enabled. Async message batches may arrive after this RPC, so
+        # the finalizer verifies exact total count before returning.
         while True:
+            pump_messages()
             item=script.exports_sync.drain(4096)
-            for event in item["events"]:
-                if event.get("dexPcSource") != PROVENANCE:
-                    raise RuntimeError("Runtime DEX identity was not verified")
-                coverage.observe(event)
-                stream.write(json.dumps(event,sort_keys=True)+"\n")
-                produced+=1
-            stream.flush()
-            if item["errors"] or item["dropped"] or item["unverifiedSites"]:
-                raise RuntimeError("Field instrumentation did not remain lossless: "+
-                                   repr({k:item[k] for k in (
-                                       "errors","dropped","unverifiedSites")}))
+            check_agent(item)
+            accept_events(item["events"])
+            pump_messages()
             if item["queued"]==0:
                 break
+
+    def settle_after_stop():
+        drain()
+        state=script.exports_sync.snapshot()
+        goal=state["totalRecorded"]
+        deadline=time.monotonic()+15
+        while produced<goal and time.monotonic()<deadline:
+            pump_messages()
+            if produced<goal:
+                time.sleep(0.025)
+        pump_messages()
+        if goal!=produced or pending_events:
+            raise RuntimeError(
+                f"Missing nterp transport records: expected={goal} "
+                f"emitted={produced} pending={len(pending_events)}")
+        if state["dropped"] or state["errors"] or state["unverifiedSites"]:
+            raise RuntimeError("Agent reported incomplete Stalker field capture")
+        return state
 
     try:
         if args.spawn:
@@ -536,10 +606,7 @@ def watch(args):
         stopped=True
         if cleanup.get("failures"):
             raise RuntimeError("Could not stop all followed threads cleanly")
-        drain()
-        state=script.exports_sync.snapshot()
-        if state.get("totalRecorded")!=produced:
-            raise RuntimeError("Agent/host event count mismatch after final drain")
+        state=settle_after_stop()
         print("ART fieldwatch summary: "+json.dumps({
             key:state.get(key) for key in (
                 "threadsFollowed","fieldHits","completedHits",
@@ -552,7 +619,7 @@ def watch(args):
             stopped=True
             if cleanup.get("failures"):
                 raise RuntimeError("Could not stop all followed threads cleanly")
-            drain()
+            settle_after_stop()
         return 0
     finally:
         if script is not None and not stopped:

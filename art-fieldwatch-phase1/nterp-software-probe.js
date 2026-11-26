@@ -42,6 +42,15 @@ const opcodeGroups = Object.freeze({
 });
 const opcodes = opcodeGroups[opcodeGroup];
 const MAX_RECORDS = 8192;
+// Optional high-throughput transport. The CLI receives asynchronous batches
+// and separately drains the tail; synthetic RPC/snapshot oracles leave this
+// disabled so they still inspect the entire recorded array.
+const streamBatchSize = globalThis.__artwatchNterpStreamBatchSize ?? 0;
+if (!Number.isInteger(streamBatchSize) || streamBatchSize<0 ||
+    streamBatchSize>1024 || (streamBatchSize!==0 && streamBatchSize<16))
+  throw new Error('Invalid Stalker stream batch size (0 or 16..1024)');
+let batchesSent=0;
+let eventsSent=0;
 const stalkedThreads = new Set();
 let followedCount=0;
 let knownHookCount=0;
@@ -421,6 +430,20 @@ function install() {
            referenceSnapshotGcStable:false,
            referenceScope:'single-nterp-opcode-completion'} : {})
     });
+    if (streamBatchSize>0 && records.length>=streamBatchSize) {
+      // Frida send() is async; one message per 128 completed accesses is
+      // much cheaper than a message per opcode. The host verifies every
+      // contiguous sequence number and the terminal totalRecorded count.
+      const batch=records.splice(0,streamBatchSize);
+      try {
+        send({type:'artwatch-nterp-record-batch',events:batch});
+        batchesSent++;
+        eventsSent+=batch.length;
+      } catch (e) {
+        dropped+=batch.length;
+        recordDiagnostic('Unable to enqueue nterp event batch: '+e);
+      }
+    }
   }
   function opcodeEnter(ctx,opcode) {
     const pc=ctx.r12,fp=ctx.r13,method=ctx.rsp.readPointer();
@@ -554,6 +577,7 @@ rpc.exports={
       ? Math.min(limit,4096) : 1024;
     const events=records.splice(0,n);
     return {events,totalRecorded:nextSequence,queued:records.length,
+      streamBatchSize,batchesSent,eventsSent,
       dropped,fieldHits,completedHits,unverifiedSites,
       errors:diagnostics};
   },
@@ -564,7 +588,8 @@ rpc.exports={
       unverifiedSites,verifiedRuntimeMethods:liveBases.size,
       abandonedFieldAttempts,pending:pendingByThread.size,
       dropped,events:records,totalRecorded:nextSequence,
-      queued:records.length,errors:diagnostics,
+      queued:records.length,streamBatchSize,batchesSent,eventsSent,
+      errors:diagnostics,
       threadsFollowed:followedCount,
       attachedHooks:stalkedThreads.size?knownHookCount:0
     };

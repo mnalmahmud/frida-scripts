@@ -111,7 +111,7 @@ public final class NoTemplateNterpActivity extends Activity {
               } catch (Throwable e) {
                 errors[worker] = e;
               }
-            }, "NterpFieldProbe-" + worker);
+            }, "NterpProbe-" + worker);
             workers[i].start();
           }
           ready.await();

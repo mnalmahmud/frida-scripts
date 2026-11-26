@@ -1089,7 +1089,7 @@ def main():
     source = ("globalThis.__artwatchNterpOpcodeGroup=" +
               json.dumps(opcode_group) + ";\n" +
               "globalThis.__artwatchNterpThreadFilter=" +
-              json.dumps("regex:^NterpFieldProbe-[01]$" if workload == "parallel"
+              json.dumps("regex:^NterpProbe-[01]$" if workload == "parallel"
                          else "NterpFieldProbe") + ";\n" +
               "globalThis.__artwatchNterpSelectors=" + json.dumps(selected) + ";\n" +
               "globalThis.__artwatchNterpProfile=" + json.dumps(profile) + ";\n" +
