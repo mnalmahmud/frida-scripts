@@ -55,6 +55,20 @@ public final class NoTemplateNterpActivity extends Activity {
     // The host releases the two workers only after Stalker confirms
     // that both named threads are followed. This avoids a startup race
     // between Thread.run() and the instrumentation observer.
+    if (intent.getBooleanExtra("jitWarm", false)) {
+      // Heat unrelated field-bearing methods to load the ART JIT compiler
+      // before the Frida observer is armed for the two target leaf methods.
+      new Thread(() -> {
+        try {
+          int calls = FieldIRTarget.warmup(50000);
+          Log.i("ARTWATCH_NTERP_LAB",
+                "NTERP_LAB_JIT_WARM_DONE checks=" + calls);
+        } catch (Throwable e) {
+          Log.e("ARTWATCH_NTERP_LAB", "NTERP_LAB_FAILED", e);
+        }
+      }, "JitWarmProbe").start();
+      return;
+    }
     if (intent.getBooleanExtra("parallelGo", false)) {
       CountDownLatch gate = parallelGate;
       if (gate != null) gate.countDown();
@@ -63,9 +77,22 @@ public final class NoTemplateNterpActivity extends Activity {
     final boolean parallel = intent.getBooleanExtra("parallel", false);
     final boolean overload = intent.getBooleanExtra("overload", false);
     final boolean streaming = intent.getBooleanExtra("streaming", false);
+    final boolean jit = intent.getBooleanExtra("jit", false);
     if ((!intent.getBooleanExtra("run", false) && !parallel && !overload &&
-         !streaming) || started) return;
+         !streaming && !jit) || started) return;
     started = true;
+    if (jit) {
+      new Thread(() -> {
+        try {
+          int checksum = NoTemplateTarget.exerciseJitFieldCanary();
+          Log.i("ARTWATCH_NTERP_LAB",
+                "NTERP_LAB_JIT_DONE checks=40000 checksum=" + checksum);
+        } catch (Throwable e) {
+          Log.e("ARTWATCH_NTERP_LAB", "NTERP_LAB_FAILED", e);
+        }
+      }, "JitFieldProbe").start();
+      return;
+    }
     if (streaming) {
       new Thread(() -> {
         try {

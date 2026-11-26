@@ -56,6 +56,28 @@ public final class NoTemplateTarget {
   // Transport stress: 20,000 real field opcodes, substantially beyond the
   // agent's former 8,192-record snapshot limit. All exact values are
   // independently checked by Java and by the host JSONL verifier.
+  // Compiler/JIT backend canary. Reflection prevents the CALLER from
+  // inlining these two leaf methods and forces actual ArtMethod invocations.
+  // Neither leaf contains any explicit tracing or sink call; each has only
+  // the ordinary real DEX iget/iput for the selected int instance field.
+  public static int exerciseJitFieldCanary() throws Exception {
+    java.lang.reflect.Method setter = NoTemplateTarget.class.getDeclaredMethod(
+        "writeInstance", NoTemplateTarget.class, int.class);
+    java.lang.reflect.Method getter = NoTemplateTarget.class.getDeclaredMethod(
+        "readInstance", NoTemplateTarget.class);
+    NoTemplateTarget receiver = new NoTemplateTarget();
+    int checksum = 0;
+    for (int i = 0; i < 40000; i++) {
+      int value = 17 + i * 3;
+      setter.invoke(null, receiver, value);
+      int observed = (Integer) getter.invoke(null, receiver);
+      if (observed != value)
+        throw new AssertionError("JIT field canary mismatch at " + i);
+      checksum ^= observed;
+    }
+    return checksum;
+  }
+
   public static int exerciseStreaming() {
     NoTemplateTarget receiver = new NoTemplateTarget();
     int checksum = 0;

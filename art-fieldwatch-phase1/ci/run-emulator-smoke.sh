@@ -125,6 +125,10 @@ if [[ "$variant" == release && "${ARTWATCH_SHADOW_SHIM:-0}" == 1 ]]; then
   # opcodes, beyond the 8192-record fixed snapshot queue capacity.
   adb shell am force-stop com.example.artfieldwatch
   python3 art-fieldwatch-phase1/ci/run-generic-stream-smoke.py
+  # Separate stock non-debuggable compiled-code canary. Observe ART JIT
+  # HInstanceFieldGet/Set machine-code emission, without using Java sinks.
+  adb shell am force-stop com.example.artfieldwatch
+  python3 art-fieldwatch-phase1/ci/run-jit-field-emission-smoke.py
 fi
 
 # Portability gate: stock API34 x86_64 has a distinct audited libart build.

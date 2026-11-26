@@ -1231,3 +1231,38 @@ coverage counts, and separately verifies that a duplicate event
 sequence causes a hard error. It does not fake an ART runtime result:
 the separate Android 33/34 20,000-event release workloads are
 required to verify actual Frida/Stalker performance and safety.
+
+## API33 stock ART JIT field code-emission backend (experimental)
+
+`jit-field-emission-probe.js` hooks the real optimizing compiler's
+x86_64 `InstructionCodeGenerator::VisitInstanceFieldGet/Set`, associated
+with an active `JitCompiler::CompileMethod` on the compiler thread.
+It verifies the **runtime and compiler mapped ELF Build IDs** against
+the known stock Android 33 release pair before interpreting any
+private compiler layout or attaching hooks. The compiler may be
+loaded lazily; an ART module observer installs after its mapping
+appears. For each HInstanceFieldGet/Set, it checks the exact exported
+instruction vtable and source-matched `dex_pc_` layout, then
+correlates that DEX PC with the packaged APK's verified field site
+catalog. It records compiler success and candidate identities.
+
+The release APK test `ci/run-jit-field-emission-smoke.py` first
+warms unrelated actual ART field methods to load the compiler.
+It then observes two deliberately sink-free DEX leaf methods,
+`NoTemplateTarget.writeInstance` and `readInstance`, called
+40,000 times through Java reflection so the calling method cannot
+inline the leaf call. The oracle requires both field get/set
+codegen visits and exact DEX site correlation, preserving a JSON
+report of matched field nodes.
+
+**This is not yet an executed-field-value backend**. Inlining,
+load-store elimination, instruction reordering, and the absence
+of a verified native-code PC map still prevent equating a compiler
+field node with an exact executed field event. The conservative
+records expressly set `valueAvailable:false`,
+`dexFileRuntimeVerified:false`, and
+`nativeInstructionOffsetKnown:false`. Arbitrary DEX/ArtMethod
+identity collisions and all AOT/ARM64/other versions are unsupported
+until validated. This is an entrypoint for generalized compiled-code
+runtime instrumentation research, not an assertion of full JIT/AOT
+field interception.
