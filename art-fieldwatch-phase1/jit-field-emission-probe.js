@@ -25,6 +25,7 @@ let rawFieldVisits=0;
 let selectedCompilations=0;
 const errors=[];
 const active=new Map();
+const methodsWithCode=new Map();
 const records=[];
 const MAX_RECORDS=512;
 const catalog=globalThis.__artwatchJitFieldCatalog;
@@ -109,6 +110,31 @@ function addRecord(record) {
   if (records.length<MAX_RECORDS) records.push(record);
   send({type:'artwatch-jit-field-emission',...record});
 }
+// ART13 x64 ArtMethod layout validated by pinned libart Build ID:
+// declaring_class_ +0, access_flags_ +4, dex_method_index_ +8,
+// method_index_ +12, hotness_count_ +14, ptr_sized_fields_.data_ +16,
+// entry_point_from_quick_compiled_code_ +24. This is a read-only
+// *method entrypoint* inventory, NOT a native field opcode offset map.
+function quickEntrypoint(method) {
+  if (!method || method.isNull()) return {valid:false};
+  try {
+    const pointer=method.add(24).readPointer();
+    const range=Process.findRangeByAddress(pointer);
+    const module=Process.findModuleByAddress(pointer);
+    const file=range?.file?.path ?? null;
+    const executable=!!range && range.protection.includes('x');
+    let category='unknown-or-trampoline';
+    if (executable && module?.name==='libart.so') category='art-runtime-stub';
+    else if (executable && file && /\.(oat|odex|art)(?:$|\.)/.test(file))
+      category='oat-or-odex-executable';
+    else if (executable && !module)
+      category='anonymous-executable-candidate';
+    else if (executable) category='mapped-native-module';
+    return {valid:executable,address:pointer.toString(),
+      category,rangeProtection:range?.protection ?? null,
+      module:module?.name ?? null,file};
+  } catch(e) {return {valid:false,error:String(e)};}
+}
 function install() {
   if (installed) return;
   if (Process.arch!=='x64' || Process.pointerSize!==8)
@@ -139,7 +165,12 @@ function install() {
                    emissions:0,records:[]};
       active.set(this.tid,state);
       this.state=state;
-      if (state.sites) selectedCompilations++;
+      if (state.sites) {
+        selectedCompilations++;
+        if (!method.isNull())
+          methodsWithCode.set(method.toString(),
+            {pointer:method,methodIndex,selectedPcs:Array.from(state.sites.keys())});
+      }
       if (records.length<120) addRecord({
         phase:'compile-start',methodIndex,
         artMethod:method.toString(),selected:!!state.sites,
@@ -209,7 +240,12 @@ function install() {
 }
 rpc.exports={
   snapshot() {return {ready,compiled,emitted,matched,
-                    selectedCompilations,rawFieldVisits,errors,records};}
+                    selectedCompilations,rawFieldVisits,errors,records,
+                    quickEntrypoints:Array.from(methodsWithCode.values(),m=>({
+                      artMethod:m.pointer.toString(),methodIndex:m.methodIndex,
+                      selectedPcs:m.selectedPcs,
+                      entrypoint:quickEntrypoint(m.pointer)
+                    }))};}
 };
 try {
   // ART typically loads libart-compiler.so on demand. Receive load

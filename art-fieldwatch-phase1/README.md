@@ -1333,3 +1333,32 @@ representation, and caller thread's JNI-transition state are
 ABI-sensitive. The feature remains **unverified and disabled by
 default** until the exact-device test succeeds; a missing export,
 invalid build, JNI error or excessive tracked objects fails closed.
+
+## Compiled ArtMethod quick-entrypoint inventory (ABI-pinned)
+
+The JIT compiler observer also inventories the **live quick entrypoint**
+of each method that reaches the selected JIT compilation boundary.
+For the source-matched Android 13 x86_64 `ArtMethod` layout,
+`dex_method_index_` is at byte 8 and
+`entry_point_from_quick_compiled_code_` is at byte 24. The probe
+reads the entrypoint **without modifying it** and checks the mapped
+executable range. A verified executable address is classified by
+its ownership: ART runtime bridge, candidate anonymous JIT code,
+or mapped OAT/ODEX native module. It does not mistake a runtime
+bridge stub for proof that a field access was compiled.
+
+Compiler-time field nodes supply potential DEX field sites, while
+the runtime quick entrypoint identifies *where the method may
+execute*. It does not yet supply the individual field instruction
+PC or its live read/write register, particularly in AOT code or
+after inlining/load-store elimination. A field-event hook must
+correlate the compiler's instruction offsets and final native
+code buffer before declaring exact JIT/AOT values.
+
+## macOS ARM64 runner label fix
+
+GitHub's public-hosted Apple Silicon standard runner uses `macos-15`,
+**not** `macos-15-arm64`. Earlier ARM64 jobs remained queued on
+the nonexistent custom label. The ARM64 CI job now uses `macos-15`,
+so its Android 34 emulator test can execute and determine whether
+the new ARM64 nterp ABI actually produces exact field events.

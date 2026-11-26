@@ -163,7 +163,7 @@ jobs:
     # Deliberately exercise real ARM64 ART on Apple Silicon; an opt-in
     # workflow_dispatch remains available for reruns outside PR CI.
     if: github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.arm64)
-    runs-on: macos-15-arm64
+    runs-on: macos-15
     timeout-minutes: 45
     env:
       FRIDA_VERSION: '17.27.1'

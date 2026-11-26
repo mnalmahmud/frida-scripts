@@ -123,6 +123,7 @@ def main():
                            ("ready","compiled","emitted","matched",
                             "rawFieldVisits","selectedCompilations","errors")},
                 "records":state.get("records",[]),
+                "quickEntrypoints":state.get("quickEntrypoints",[]),
                 "fridaMessages":messages[-64:],
                 "javaLog":log(target)[-6000:]
             }
@@ -142,6 +143,7 @@ def main():
             "noRuntimeFieldValues":True,
             "noAotCoverage":True,
             "summary":{k:state[k] for k in ("compiled","emitted","matched")},
+            "quickEntrypoints":state.get("quickEntrypoints",[]),
             "records":fields
         }
         (folder/"jit-field-codegen-observations.json").write_text(
