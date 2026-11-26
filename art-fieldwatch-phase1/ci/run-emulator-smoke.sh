@@ -68,6 +68,20 @@ fi
 # Pull ART ELF files for offline symbol inspection; never scan their full
 # symbol tables inside the injected application.
 bash art-fieldwatch-phase1/ci/art-binary-inventory.sh || true
+if [[ "${ARTWATCH_ARM64_ONLY:-0}" == 1 ]]; then
+  if [[ "$variant" != release || "$ABI" != arm64-v8a ]]; then
+    echo "ARM64 nterp experiment must use release app and arm64-v8a" >&2
+    exit 1
+  fi
+  test -s "${ARTWATCH_LOG_DIR:-/tmp/artwatch-logs}/nterp-arm64-experimental-profile.json" ||
+    { echo "ARM64 nterp table ELF profile not established" >&2; exit 1; }
+  # Actual stock ARM64 Java field read/write values. No modified ART,
+  # no debugger attachment and no Java tracing templates.
+  python3 art-fieldwatch-phase1/ci/run-generic-watch-smoke.py
+  adb shell am force-stop com.example.artfieldwatch
+  python3 art-fieldwatch-phase1/ci/run-generic-stream-smoke.py
+  exit 0
+fi
 if ! python3 art-fieldwatch-phase1/ci/smoke_test.py; then
   adb shell cat /data/local/tmp/artwatch-frida-server.log || true
   adb logcat -d -t 1500 > "$ARTWATCH_LOG_DIR/logcat-failure.txt" || true

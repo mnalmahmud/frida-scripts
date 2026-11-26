@@ -1266,3 +1266,35 @@ identity collisions and all AOT/ARM64/other versions are unsupported
 until validated. This is an entrypoint for generalized compiled-code
 runtime instrumentation research, not an assertion of full JIT/AOT
 field interception.
+
+## Android 14 ARM64 nterp runtime port (experimental)
+
+The nterp software agent now has an ARM64-specific register decoder,
+separate from the proven API33/34 x86_64 ABI:
+
+- `x22` = DEX PC, `x29` = 32-bit DEX virtual-register array,
+  `x23` = current instruction, `x24` = handler table base,
+  `x25` = ART GC-visible reference-slot array.
+- `sp[0]` = active `ArtMethod*`; the same exact packaged DEX
+  code-byte validation checks method index, opcode, field index and PC.
+- Primitive and wide values are copied from the DEX registers;
+  references are read **only as ephemeral compressed GC root bits**
+  and are never dereferenced as `jobject`/JNI handles.
+
+These assignments come from AOSP
+`runtime/interpreter/mterp/arm64ng/main.S`; they must be
+revalidated on each installed stock binary. The ARM64 path requires
+**both** `--experimental-arm64` and a matching ELF-derived
+`--auto-profile` (or a previously resolved profile), including
+its GNU Build ID, architecture, exact table-symbol offsets,
+handler size and opcode count. An incorrectly signed/absent profile
+does not enable a fallback or a guessed hook location.
+
+A dedicated Android 34 **non-debuggable release** macOS Apple Silicon
+CI job builds the APK, inspects the installed ARM64 `libart.so`,
+and runs the 512-event overloaded and 20,000-event stress oracles
+against genuine ARM64 opcode handlers. Until that job passes, ARM64
+is *experimental*, not validated. Unlike x86_64, the ARM64 entry
+is dynamically pinned to the **actual pulled** ELF Build ID
+rather than a multi-device allowlist; it is deliberately not
+auto-enabled for unrelated apps/builds.

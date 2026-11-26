@@ -70,6 +70,8 @@ def main():
            "--output", str(output), "--coverage-output", str(report)]
     for name in SITES:
         cmd += ["--field", f"{OWNER}#{name}#value"]
+    if os.environ.get("ARTWATCH_ARM64_ONLY")=="1":
+        cmd.append("--experimental-arm64")
     with trace.open("w+", encoding="utf-8") as log:
         child = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=log)
         try:

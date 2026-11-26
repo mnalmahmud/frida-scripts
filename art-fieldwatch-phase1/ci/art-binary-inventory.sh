@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # Offline ELF visibility evidence (no symbol scan inside the Frida process).
 set -euo pipefail
+# macOS Homebrew installs GNU binutils with a g-prefix.
+if ! command -v readelf >/dev/null 2>&1 && command -v greadelf >/dev/null 2>&1; then
+  readelf() { greadelf "$@"; }
+fi
 out="${ARTWATCH_LOG_DIR:-/tmp/artwatch-logs}"
 mkdir -p "$out"
 tmp="$(mktemp -d)"
@@ -19,6 +23,14 @@ abi="$(adb shell getprop ro.product.cpu.abi | tr -d '\r')"
       python3 art-fieldwatch-phase1/ci/nterp_profile.py "$tmp/$library" \
         --api "$api" --out "$out/nterp-profile.json" ||
         echo "NTERP_PROFILE_UNAVAILABLE: stock ART table could not be certified"
+    fi
+    if [[ "$library" == libart.so && "$abi" == arm64-v8a && "$api" == 34 ]]; then
+      # Only a device-matched, experimental ABI profile; no built-in
+      # ARM64 allowlist or claim of confirmed field-event fidelity.
+      python3 art-fieldwatch-phase1/ci/nterp_profile.py "$tmp/$library" \
+        --api 34 --architecture arm64 --experimental-arm64 \
+        --out "$out/nterp-arm64-experimental-profile.json" ||
+        echo "ARM64_NTERP_PROFILE_UNAVAILABLE: ELF table not independently verified"
     fi
     echo "=== $library ==="
     sha256sum "$tmp/$library"

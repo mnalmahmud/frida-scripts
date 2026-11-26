@@ -158,13 +158,16 @@ jobs:
           path: /tmp/artwatch-logs/
           if-no-files-found: ignore
   android-arm64:
-    if: github.event_name == 'workflow_dispatch' && inputs.arm64
-    runs-on: macos-15
+    # Deliberately exercise real ARM64 ART on Apple Silicon; an opt-in
+    # workflow_dispatch remains available for reruns outside PR CI.
+    if: github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.arm64)
+    runs-on: macos-15-arm64
     timeout-minutes: 45
     env:
       FRIDA_VERSION: '17.27.1'
       ARTWATCH_LOG_DIR: /tmp/artwatch-logs
-      ARTWATCH_REQUIRE_JIT: '1'
+      ARTWATCH_BUILD_VARIANT: release
+      ARTWATCH_ARM64_ONLY: '1'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
@@ -180,7 +183,8 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.10.2'
-      - run: gradle -p art-fieldwatch-phase1/test :app:assembleDebug --no-daemon
+      - run: brew install binutils
+      - run: gradle -p art-fieldwatch-phase1/test :app:assembleRelease --no-daemon
       - run: python3 -m pip install 'frida==17.27.1'
       - uses: reactivecircus/android-emulator-runner@v2
         with:

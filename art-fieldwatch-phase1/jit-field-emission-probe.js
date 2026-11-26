@@ -21,6 +21,8 @@ let compilerObserver=null;
 let compiled=0;
 let emitted=0;
 let matched=0;
+let rawFieldVisits=0;
+let selectedCompilations=0;
 const errors=[];
 const active=new Map();
 const records=[];
@@ -137,6 +139,12 @@ function install() {
                    emissions:0,records:[]};
       active.set(this.tid,state);
       this.state=state;
+      if (state.sites) selectedCompilations++;
+      if (records.length<120) addRecord({
+        phase:'compile-start',methodIndex,
+        artMethod:method.toString(),selected:!!state.sites,
+        selectedSitePcs:state.sites ? Array.from(state.sites.keys()) : []
+      });
     },
     onLeave(ret) {
       if (this.state.emissions>0)
@@ -153,13 +161,22 @@ function install() {
     Interceptor.attach(addr,{
       onEnter(args) {
         const state=active.get(Process.getCurrentThreadId());
-        if (!state || !state.sites) return;
+        if (!state) return;
         const node=args[1];
         if (node.isNull()) return;
         // Source-matched ART HInstruction: vptr [0], previous [8],
         // next [16], owning HBasicBlock [24], dex_pc_ [32].
-        if (!node.readPointer().equals(vtable)) return;
-        const pc=node.add(32).readU32();
+        const verified=node.readPointer().equals(vtable);
+        rawFieldVisits++;
+        const pc=verified ? node.add(32).readU32() : null;
+        if (records.length<120) addRecord({
+          phase:'field-codegen-inventory',kind,
+          methodIndex:state.methodIndex,
+          selectedMethod:!!state.sites,
+          nodeVtableVerified:verified,
+          dexPc:pc
+        });
+        if (!verified || !state.sites) return;
         const candidates=state.sites.get(pc) || [];
         const sites=candidates.filter(c=>c.operation===kind);
         if (!sites.length) return;
@@ -191,7 +208,8 @@ function install() {
     selectedMethods:selected.size});
 }
 rpc.exports={
-  snapshot() {return {ready,compiled,emitted,matched,errors,records};}
+  snapshot() {return {ready,compiled,emitted,matched,
+                    selectedCompilations,rawFieldVisits,errors,records};}
 };
 try {
   // ART typically loads libart-compiler.so on demand. Receive load

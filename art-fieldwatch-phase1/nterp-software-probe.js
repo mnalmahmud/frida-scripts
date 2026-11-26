@@ -12,6 +12,8 @@
 // the following handler at pc+4; failed null/resolution never reaches it.
 // The result is sampled at that next opcode, never by re-reading the field.
 const profile = globalThis.__artwatchNterpProfile;
+const arm64Experimental = globalThis.__artwatchExperimentalArm64 === true;
+const isArm64 = profile?.architecture === 'arm64';
 const knownBuildIds=Object.freeze({
   33:'c8b6a2df9893030c07b3b96dc24a7d30',
   34:'b6dc79e02101ea00827a35a55ab6597a'
@@ -267,10 +269,19 @@ function selectFieldSites(data, selectors) {
   return {methods,count};
 }
 function install() {
+  const pinnedX64 = !isArm64 &&
+    Object.hasOwn(knownBuildIds,profile?.api) &&
+    profile.architecture === 'x86_64' &&
+    Process.arch === 'x64';
+  // This is deliberately NOT a generalized ABI assumption. An ARM64
+  // build needs both explicit CLI opt-in AND a profile generated from the
+  // actual installed arm64 libart ELF, then live build-ID verification.
+  const experimentalArm = isArm64 && arm64Experimental &&
+    profile?.experimentalArm64 === true && profile.api === 34 &&
+    /^[0-9a-f]{32}(?:[0-9a-f]{8})?$/.test(profile.buildId) &&
+    Process.arch === 'arm64';
   if (!['allPrimitives','allFields'].includes(opcodeGroup) || !profile ||
-      !Object.hasOwn(knownBuildIds,profile.api) ||
-      profile.architecture !== 'x86_64' ||
-      Process.arch !== 'x64' || Process.pointerSize !== 8 ||
+      (!pinnedX64 && !experimentalArm) || Process.pointerSize !== 8 ||
       profile.handlerSize !== 128 || profile.opcodeCount !== 256)
     throw new Error('Unsupported nterp software dispatcher ABI');
   if (typeof threadFilter !== 'string' || threadFilter.length === 0 ||
@@ -289,7 +300,7 @@ function install() {
   if (!art) throw new Error('No live libart.so module');
   const buildId=readLiveBuildId(art);
   if (buildId!==profile.buildId ||
-      buildId!==knownBuildIds[profile.api])
+      (pinnedX64 && buildId!==knownBuildIds[profile.api]))
     throw new Error('Unsupported exact stock ART build ID');
   if (!Number.isInteger(profile.startOffset) ||
       !Number.isInteger(profile.endOffset) ||
@@ -370,7 +381,7 @@ function install() {
     return match.site;
   }
 
-  function readVreg(frame,vreg,descriptor,registersSize) {
+  function readVreg(frame,vreg,descriptor,registersSize,referenceBase) {
     const slot=frame.add(vreg*4);
     if (descriptor.startsWith('L') || descriptor.startsWith('[')) {
       if (!Number.isInteger(registersSize) || vreg>=registersSize)
@@ -378,7 +389,7 @@ function install() {
       // ART's reference array is GC-scanned and updated during moving
       // collection. Capture only the 32-bit slot bits at this instant;
       // DO NOT dereference, retain, or interpret as a stable JNI handle.
-      const rootSlot=frame.sub(registersSize*4).add(vreg*4);
+      const rootSlot=(referenceBase || frame.sub(registersSize*4)).add(vreg*4);
       return '0x'+rootSlot.readU32().toString(16).padStart(8,'0');
     }
     if (descriptor==='J' || descriptor==='D') {
@@ -405,8 +416,10 @@ function install() {
     if (!p.sampled) return;
     completedHits++;
     const f=p.sampled;
+    const frame=isArm64 ? ctx.x29 : ctx.r13;
+    const refs=isArm64 ? ctx.x25 : null;
     const value=f.kind===1 ?
-      readVreg(ctx.r13,f.vreg,f.fieldType,f.registersSize) : f.preValue;
+      readVreg(frame,f.vreg,f.fieldType,f.registersSize,refs) : f.preValue;
     if (records.length>=MAX_RECORDS) {dropped++;return;}
     if (nextSequence<8)
       send({type:'artwatch-nterp-software-record-sample',
@@ -446,8 +459,15 @@ function install() {
     }
   }
   function opcodeEnter(ctx,opcode) {
-    const pc=ctx.r12,fp=ctx.r13,method=ctx.rsp.readPointer();
-    if (pc.isNull() || fp.isNull() || method.isNull() || pc.readU8()!==opcode)
+    // ARM64 AOSP nterp: x22=DEX PC, x29=vregs, x25=reference roots,
+    // x23=instruction, x24=dispatcher base, sp[0]=ArtMethod.
+    // x86_64 AOSP nterp: r12=PC, r13=vregs, rbx=instruction, rsp[0]=method.
+    const pc=isArm64 ? ctx.x22 : ctx.r12;
+    const fp=isArm64 ? ctx.x29 : ctx.r13;
+    const method=(isArm64 ? ctx.sp : ctx.rsp).readPointer();
+    const inst=isArm64 ? ctx.x23 : ctx.rbx;
+    if (pc.isNull() || fp.isNull() || method.isNull() ||
+        pc.readU8()!==opcode || (isArm64 && !ctx.x24.equals(handlerBase)))
       return; // Do not attribute unknown interpreter register state.
     const tid=Process.getCurrentThreadId();
     callbacks++;
@@ -466,11 +486,13 @@ function install() {
       liveFieldSite(method,pc,methodCandidates,opcode,fieldId);
     let sampled=null;
     if (target && target.opcode===opcode && target.fieldId===fieldId &&
-        (ctx.rbx.toUInt32()&255)===high) {
+        (isArm64 ? ((inst.toUInt32()>>>8)&255) :
+                   (inst.toUInt32()&255))===high) {
       const vreg=opcode>=0x60 ? high : high&15;
       sampled={...target,vreg,
         preValue:target.kind===2 ?
-          readVreg(fp,vreg,target.fieldType,target.registersSize) : null};
+          readVreg(fp,vreg,target.fieldType,target.registersSize,
+                   isArm64 ? ctx.x25 : null) : null};
       fieldHits++;
     }
     if (sampled)
@@ -546,7 +568,8 @@ function install() {
     buildId,mode:'stalker-callout',
     hookOpcodes:Array.from(hookOpcodes).sort((a,b)=>a-b),
     candidateHandlers:hookAddresses.size,selectedFieldSites:selected.count,
-    threadFilter,opcodeGroup});
+    threadFilter,opcodeGroup,architecture:profile.architecture,
+    experimentalArm64:experimentalArm});
   return start;
 }
 let armBackend=null;

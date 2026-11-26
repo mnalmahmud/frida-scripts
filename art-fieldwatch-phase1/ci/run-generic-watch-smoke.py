@@ -67,6 +67,8 @@ def main():
     # so the observation report must distinguish executed nterp sites
     # from sites that were merely indexed.
     cmd.extend(["--watch-field", f"{OWNER}#value"])
+    if os.environ.get("ARTWATCH_ARM64_ONLY")=="1":
+        cmd.append("--experimental-arm64")
     with stderr.open("w+",encoding="utf-8") as log:
         child=subprocess.Popen(cmd,stdout=subprocess.DEVNULL,stderr=log)
         try:

@@ -112,7 +112,23 @@ def main():
                       if r.get("phase")=="field-codegen" and
                       r.get("candidateCount")==1}
             return snapshot if observed=={"read","write"} else None
-        state=wait(has_compiled_sites,20,"both exact JIT compiler field emissions")
+        try:
+            state=wait(has_compiled_sites,20,
+                       "both exact JIT compiler field emissions")
+        except AssertionError as original:
+            state=script.exports_sync.snapshot()
+            detail={
+                "summary":{k:state.get(k) for k in
+                           ("ready","compiled","emitted","matched",
+                            "rawFieldVisits","selectedCompilations","errors")},
+                "records":state.get("records",[]),
+                "fridaMessages":messages[-64:],
+                "javaLog":log(target)[-6000:]
+            }
+            (folder/"jit-field-codegen-diagnostics.json").write_text(
+                json.dumps(detail,indent=2,sort_keys=True)+"\n")
+            raise AssertionError(str(original)+"; observed "+
+                                 json.dumps(detail["summary"])) from original
         fields=[r for r in state["records"] if r["phase"]=="field-codegen"]
         if not fields or state["errors"] or any(
                 r["candidateCount"]!=1 or

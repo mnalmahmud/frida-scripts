@@ -18,6 +18,7 @@ import json
 import os
 import re
 import queue
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -69,22 +70,34 @@ def parse_declared_field(text):
     return {"declaringClass": parts[0], "fieldName": parts[1]}
 
 
-def verify_profile(profile):
-    if (not isinstance(profile, dict) or profile.get("schemaVersion") != 1 or
-            profile.get("api") not in KNOWN_BUILD_IDS or
-            profile.get("architecture") != "x86_64" or
-            profile.get("buildId") != KNOWN_BUILD_IDS[profile["api"]] or
-            profile.get("handlerSize") != 128 or
+def verify_profile(profile,experimental_arm64=False):
+    if not isinstance(profile,dict) or profile.get("schemaVersion") != 1:
+        raise ValueError("Invalid ART profile schema")
+    arch=profile.get("architecture")
+    if arch=="x86_64":
+        pinned=(profile.get("api") in KNOWN_BUILD_IDS and
+                profile.get("buildId")==KNOWN_BUILD_IDS[profile["api"]])
+    elif arch=="arm64":
+        pinned=(experimental_arm64 and
+                profile.get("experimentalArm64") is True and
+                profile.get("api")==34 and
+                isinstance(profile.get("buildId"),str) and
+                re.fullmatch(r"[0-9a-f]{32}(?:[0-9a-f]{8})?",
+                             profile["buildId"]) is not None)
+    else:
+        pinned=False
+    if (not pinned or profile.get("handlerSize") != 128 or
             profile.get("opcodeCount") != 256 or
-            not isinstance(profile.get("startOffset"), int) or
-            not isinstance(profile.get("endOffset"), int) or
+            type(profile.get("startOffset")) is not int or
+            type(profile.get("endOffset")) is not int or
             profile["startOffset"] <= 0 or
             profile["endOffset"] - profile["startOffset"] != 32768):
         raise ValueError("Unsupported ART profile; no address guesses permitted")
     return profile
 
 
-def discover_device_profile(adb="adb", readelf="readelf"):
+def discover_device_profile(adb="adb", readelf="readelf",
+                            experimental_arm64=False):
     """Verify the installed ART ELF using the device's actual binary.
 
     No guessed offsets: the ELF build ID, machine, symbol table, and exact
@@ -95,9 +108,15 @@ def discover_device_profile(adb="adb", readelf="readelf"):
                               check=True,capture_output=True,text=True,
                               timeout=20)
         return result.stdout.strip()
+    if readelf=="readelf" and shutil.which("readelf") is None:
+        readelf=shutil.which("greadelf") or readelf
     sdk=prop("ro.build.version.sdk")
     abi=prop("ro.product.cpu.abi")
-    if not sdk.isdigit() or int(sdk) not in KNOWN_BUILD_IDS or abi!="x86_64":
+    arch=("arm64" if abi=="arm64-v8a" and experimental_arm64 else
+          "x86_64" if abi=="x86_64" else None)
+    if (not sdk.isdigit() or arch is None or
+            (arch=="x86_64" and int(sdk) not in KNOWN_BUILD_IDS) or
+            (arch=="arm64" and int(sdk)!=34)):
         raise ValueError(f"No approved nterp profile for SDK={sdk} ABI={abi}")
     with tempfile.TemporaryDirectory(prefix="artwatch-profile-") as directory:
         libart=Path(directory)/"libart.so"
@@ -118,8 +137,10 @@ def discover_device_profile(adb="adb", readelf="readelf"):
         def elf(*options):
             return subprocess.check_output([readelf,*options,str(libart)],
                                            text=True,timeout=30)
-        return verify_profile(resolve(elf("--wide","-Ws"),
-                                      elf("-n"),elf("-h"),api=int(sdk)))
+        return verify_profile(resolve(
+            elf("--wide","-Ws"),elf("-n"),elf("-h"),api=int(sdk),
+            architecture=arch,experimental_arm64=experimental_arm64),
+            experimental_arm64=experimental_arm64)
 
 
 def inventory_packages(apks, loader=inventory):
@@ -311,7 +332,8 @@ class CoverageTracker:
         }
 
 
-def assemble_agent(catalog, profile, selectors, thread, group):
+def assemble_agent(catalog, profile, selectors, thread, group,
+                   experimental_arm64=False):
     if group not in ("allPrimitives", "allFields"):
         raise ValueError("Software Stalker supports only allPrimitives/allFields")
     if not thread or len(thread) > 128:
@@ -322,7 +344,9 @@ def assemble_agent(catalog, profile, selectors, thread, group):
         "__artwatchNterpStreamBatchSize": 128,
         "__artwatchNterpThreadFilter": thread,
         "__artwatchNterpSelectors": selectors,
-        "__artwatchNterpProfile": verify_profile(profile),
+        "__artwatchNterpProfile": verify_profile(
+            profile,experimental_arm64=experimental_arm64),
+        "__artwatchExperimentalArm64": experimental_arm64,
         "__artwatchNterpCatalog": catalog,
     }
     # Serialize rather than interpolate selector text into JavaScript.
@@ -353,6 +377,19 @@ def self_test():
     }
     verify_profile(profile)
     verify_profile({**profile,"api":34,"buildId":KNOWN_BUILD_IDS[34]})
+    arm_profile={**profile,"api":34,"architecture":"arm64",
+                 "buildId":"a"*40,"experimentalArm64":True}
+    try:verify_profile(arm_profile)
+    except ValueError:pass
+    else:raise AssertionError("ARM64 profile permitted without explicit opt-in")
+    assert verify_profile(arm_profile,experimental_arm64=True)==arm_profile
+    for bad in ({**arm_profile,"experimentalArm64":False},
+                {**arm_profile,"buildId":"wrong"},
+                {**arm_profile,"api":33},
+                {**arm_profile,"startOffset":0}):
+        try:verify_profile(bad,experimental_arm64=True)
+        except ValueError:pass
+        else:raise AssertionError("Invalid ARM64 ELF profile accepted")
     for invalid in ({**profile,"api":35},
                     {**profile,"api":34},
                     {**profile,"buildId":"0"*40},
@@ -479,8 +516,11 @@ def watch(args):
     declaring_fields = ([parse_declared_field(item) for item in args.watch_field]
                         if args.watch_field else None)
     group = "allPrimitives" if args.primitives_only else "allFields"
-    profile = (discover_device_profile() if args.auto_profile else
-               verify_profile(json.loads(args.profile.read_text())))
+    experimental_arm64=getattr(args,"experimental_arm64",False)
+    profile = (discover_device_profile(
+                    experimental_arm64=experimental_arm64) if args.auto_profile
+               else verify_profile(json.loads(args.profile.read_text()),
+                                   experimental_arm64=experimental_arm64))
     full_catalog = inventory_packages(args.apk)
     if declaring_fields is not None:
         # The runtime agent gets a narrowly scoped DEX catalog and null
@@ -498,7 +538,8 @@ def watch(args):
         try: re.compile(args.thread_regex)
         except re.error as e:
             raise ValueError("Invalid thread selection regex") from e
-    source=assemble_agent(catalog,profile,selectors,thread_selection,group)
+    source=assemble_agent(catalog,profile,selectors,thread_selection,group,
+                          experimental_arm64=experimental_arm64)
 
     # Frida is imported only when actually running on a connected device;
     # static/unit tests do not require the mobile SDK or live device.
@@ -691,6 +732,9 @@ def main():
                               help="Prevalidated ART nterp ELF profile JSON")
     profile_args.add_argument("--auto-profile",action="store_true",
                               help="Pull installed libart ELF and verify its exact ABI")
+    parser.add_argument("--experimental-arm64",action="store_true",
+                        help="Opt in to source-derived ARM64 API34 nterp ABI; "
+                             "requires exact device ELF profile")
     parser.add_argument("--process",help="Existing process name/PID or spawn package")
     thread_selection=parser.add_mutually_exclusive_group()
     thread_selection.add_argument("--thread",

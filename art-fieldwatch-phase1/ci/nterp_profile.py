@@ -21,15 +21,31 @@ OPCODES = 256
 SYMBOLS = ("artNterpAsmInstructionStart", "artNterpAsmInstructionEnd")
 
 
-def resolve(symbol_table, notes, header, api=33):
-    expected_build = KNOWN_BUILD_IDS.get(api)
-    if not expected_build:
-        raise ValueError("Unsupported Android API for pinned nterp backend")
+def resolve(symbol_table, notes, header, api=33, architecture="x86_64",
+            experimental_arm64=False):
+    if architecture == "x86_64":
+        expected_build = KNOWN_BUILD_IDS.get(api)
+        expected_machine = r"Machine:\s*Advanced Micro Devices X86-64"
+        if not expected_build:
+            raise ValueError("Unsupported Android API for pinned nterp backend")
+    elif architecture == "arm64" and experimental_arm64 and api == 34:
+        # The ARM64 opt-in is an ABI experiment, NOT an allowlisted runtime.
+        # Obtain the exact Build ID from the actual, pulled libart ELF.
+        expected_machine = r"Machine:\s*AArch64"
+        expected_build = None
+    else:
+        raise ValueError("Unsupported architecture or missing ARM64 opt-in")
     build = re.search(r"Build ID:\s*([a-fA-F0-9]+)", notes)
-    if not build or build.group(1).lower() != expected_build:
+    if not build or (expected_build is not None and
+                     build.group(1).lower() != expected_build):
         raise ValueError(f"Unsupported libart.so GNU Build ID on API {api}")
-    if not re.search(r"Machine:\s*Advanced Micro Devices X86-64", header):
-        raise ValueError("Not x86_64 ART")
+    if not re.search(expected_machine, header):
+        raise ValueError("ART ELF architecture does not match the selected backend")
+    if architecture == "arm64":
+        actual = build.group(1).lower()
+        if len(actual) not in (32,40):
+            raise ValueError("Invalid ARM64 ELF GNU Build ID")
+        expected_build = actual
     if not re.search(r"Type:\s*DYN\b", header):
         raise ValueError("Expected a position-independent ELF shared library")
     found = {}
@@ -48,10 +64,13 @@ def resolve(symbol_table, notes, header, api=33):
     start, end = (next(iter(found[name])) for name in SYMBOLS)
     if start == 0 or end - start != OPCODES * HANDLER_SIZE:
         raise ValueError("Unexpected nterp opcode table span")
-    return {"schemaVersion": 1, "architecture": "x86_64",
-            "api": api, "buildId": expected_build,
-            "startOffset": start, "endOffset": end,
-            "handlerSize": HANDLER_SIZE, "opcodeCount": OPCODES}
+    result = {"schemaVersion": 1, "architecture": architecture,
+              "api": api, "buildId": expected_build,
+              "startOffset": start, "endOffset": end,
+              "handlerSize": HANDLER_SIZE, "opcodeCount": OPCODES}
+    if architecture == "arm64":
+        result["experimentalArm64"] = True
+    return result
 
 
 def self_test():
@@ -78,6 +97,17 @@ def self_test():
             pass
         else:
             raise AssertionError("Invalid nterp table accepted")
+    armheader = "Type: DYN (Shared object file)\nMachine: AArch64"
+    arm = resolve(table,"Build ID: "+"a"*40,armheader,api=34,
+                  architecture="arm64",experimental_arm64=True)
+    assert arm["experimentalArm64"] and arm["architecture"]=="arm64"
+    assert arm["buildId"]=="a"*40
+    for overrides in ({"architecture":"arm64"},
+                      {"architecture":"arm64","experimental_arm64":True},
+                      {"architecture":"x86_64","experimental_arm64":True}):
+        try: resolve(table,"Build ID: "+"a"*40,header,api=34,**overrides)
+        except (TypeError,ValueError):pass
+        else:raise AssertionError("ARM64 ELF header/opt-in check bypassed")
     try:
         resolve(table, "Build ID: " + "0"*32, header)
     except ValueError:
@@ -93,6 +123,9 @@ def main():
     parser.add_argument("--out", type=Path)
     parser.add_argument("--api", type=int, choices=sorted(KNOWN_BUILD_IDS),
                         default=33)
+    parser.add_argument("--architecture", choices=("x86_64","arm64"),
+                        default="x86_64")
+    parser.add_argument("--experimental-arm64", action="store_true")
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
     if args.self_test:
@@ -103,7 +136,9 @@ def main():
     def elf(*options):
         return subprocess.check_output(["readelf", *options, str(args.libart)],
                                        text=True)
-    result = resolve(elf("--wide", "-Ws"), elf("-n"), elf("-h"), api=args.api)
+    result = resolve(elf("--wide", "-Ws"), elf("-n"), elf("-h"),
+                     api=args.api, architecture=args.architecture,
+                     experimental_arm64=args.experimental_arm64)
     args.out.write_text(json.dumps(result, indent=2) + "\n")
     print("Verified nterp opcode table:", json.dumps(result, sort_keys=True))
 
